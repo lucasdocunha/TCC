@@ -11,7 +11,8 @@ def main():
     data_img = '/media/ssd2/lucas.ocunha/datasets/phase1/trainset'
 
     dataset = ImageDataset(
-        file_csv=f'{PWD}/data/raw/train.csv'
+        file_csv=f'{PWD}/data/raw/train.csv',
+	images_dir=data_img
     )
 
     print(dataset[0])
