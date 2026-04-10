@@ -4,10 +4,12 @@ from PIL import Image
 import numpy as np
 from pathlib import Path
 from torchvision import transforms 
+import os 
+
 
 class ImageDataset(Dataset):
-    def __init__(self, file:Path, transform:transforms):
-        self.df = pd.read_csv(file, sep=';', names=['path', 'label'], header=None)
+    def __init__(self, file_csv:Path, transform:transforms.Compose|None=None):
+        self.df = pd.read_csv(file_csv, sep=',')
         
         #padrão da ImageNET -> outros modelos feitos em demais bases, possuem outros
         self.transform = transform if transform else transforms.Compose([
@@ -18,6 +20,8 @@ class ImageDataset(Dataset):
                 std=[0.229, 0.224, 0.225]
             )
         ])
+
+        self.data_dir_images = file_csv.absolute().parent
         
     def __len__(self):
         return len(self.df)
@@ -26,7 +30,7 @@ class ImageDataset(Dataset):
     #crio um iterador para pegar a imagem, label e a posição do dado
     def __getitem__(self, idx):
         img_path = self.df.iloc[idx, 0]
-        with Image.open(img_path) as img:
+        with Image.open(os.path.join(self.data_dir_images, img_path)) as img:
             img = img.convert('RGB')
             
         label = self.df.iloc[idx, 1]
