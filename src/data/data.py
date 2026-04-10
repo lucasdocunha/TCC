@@ -8,8 +8,12 @@ import os
 
 
 class ImageDataset(Dataset):
-    def __init__(self, file_csv:Path, transform:transforms.Compose|None=None):
-        self.df = pd.read_csv(file_csv, sep=',')
+    def __init__(self, file_csv:Path, images_dir:Path, transform:transforms.Compose|None=None):
+        self.images_dir = images_dir
+        self.df = pd.read_csv(file_csv)
+        
+        #csv genérico, para ser adaptável para o pc de cada um 
+        self.df['img_name'] = self.df['img_name'].apply(lambda x: os.path.join(self.images_dir, x))
         
         #padrão da ImageNET -> outros modelos feitos em demais bases, possuem outros
         self.transform = transform if transform else transforms.Compose([
@@ -21,7 +25,6 @@ class ImageDataset(Dataset):
             )
         ])
 
-        self.data_dir_images = file_csv.absolute().parent
         
     def __len__(self):
         return len(self.df)
@@ -30,7 +33,7 @@ class ImageDataset(Dataset):
     #crio um iterador para pegar a imagem, label e a posição do dado
     def __getitem__(self, idx):
         img_path = self.df.iloc[idx, 0]
-        with Image.open(os.path.join(self.data_dir_images, img_path)) as img:
+        with Image.open(img_path) as img:
             img = img.convert('RGB')
             
         label = self.df.iloc[idx, 1]

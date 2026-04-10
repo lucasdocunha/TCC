@@ -4,14 +4,14 @@ from torchvision import transforms
 import os
 
 
+PWD = Path.cwd()
 
 def main():
-    data_dir = '/media/ssd2/lucas.ocunha/datasets/phase1'
 
-    data_dir = Path.absolute().parent
+    data_img = '/media/ssd2/lucas.ocunha/datasets/phase1/trainset'
 
     dataset = ImageDataset(
-        file=os.path.join(data_dir, "trainset_label.txt")
+        file_csv=f'{PWD}/data/raw/train.csv'
     )
 
     print(dataset[0])
