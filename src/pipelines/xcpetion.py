@@ -1,5 +1,6 @@
 from src.data import ImageDataset
 from src.models import xception
+from src.plots import *
 
 import torch 
 import torch.nn as nn
@@ -226,3 +227,13 @@ torch.save(
             model.state_dict(),
             f"models/{model_name}/weights/{model_name}.pth"
 )
+
+plot_confusion_matrix(test_results, model_dir, f'{model_name} Confusion Matrix')
+plot_roc_auc(test_results, model_dir, f'{model_name} ROC-AUC Curve')
+
+extra_info = {
+    'Camadas descongeladas': 3,
+    'Nº épocas': num_epochs
+}
+
+save_metrics_csv(test_results, model_dir, extra_info=extra_info)
