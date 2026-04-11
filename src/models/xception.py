@@ -139,6 +139,7 @@ class Xception(nn.Module):
         self.block10=Block(728,728,3,1,start_with_relu=True,grow_first=True)
         self.block11=Block(728,728,3,1,start_with_relu=True,grow_first=True)
 
+        #vou descongelar daqui para frente:
         self.block12=Block(728,1024,2,2,start_with_relu=True,grow_first=False)
 
         self.conv3 = SeparableConv2d(1024,1536,3,1,1)
@@ -151,7 +152,6 @@ class Xception(nn.Module):
         self.fc = nn.Linear(2048, num_classes)
 
 
-
         #------- init weights --------
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -161,9 +161,6 @@ class Xception(nn.Module):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
         #-----------------------------
-
-
-
 
 
     def forward(self, x):
