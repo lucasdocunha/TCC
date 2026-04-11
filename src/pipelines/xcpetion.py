@@ -140,7 +140,7 @@ def run_xception():
     #no scheduler, ao usar ele, ele identifica quando o modelo está aprendendo e quando está parando de aprender
     # vai ajustando a taxa de learning rate conforme isso, ajuda que o modelo a convergir
 
-    num_epochs = 10
+    num_epochs = 100
     best_val_loss = float('inf')
     best_path = f"models/{model_name}/weights/best_{model_name}.pth"
     os.makedirs(os.path.dirname(best_path), exist_ok=True)

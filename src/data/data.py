@@ -33,9 +33,13 @@ class ImageDataset(Dataset):
     #crio um iterador para pegar a imagem, label e a posição do dado
     def __getitem__(self, idx):
         img_path = self.df.iloc[idx, 0]
-        with Image.open(img_path) as img:
-            img = img.convert('RGB')
-            
+        try:
+            with Image.open(img_path) as img:
+                img = img.convert('RGB')
+        except Exception as e:
+            print(f"Erro na imagem: {img_path} -> {e}")
+            return self.__getitem__((idx + 1) % len(self))  # pega próxima
+    
         label = self.df.iloc[idx, 1]
         
         image = self.transform(img)
