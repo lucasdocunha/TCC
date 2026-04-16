@@ -7,3 +7,6 @@
 
 min_dataset
 *.zip
+
+/models/
+/models/*

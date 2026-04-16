@@ -351,7 +351,7 @@ def run_xception(fourier: FourierMode = "none", epochs=10, raw_min=True):
     #salvo o modelo treinado
     torch.save(
                 model.state_dict(),
-                f"models/{model_name}/weights/{model_name}.pth"
+                f"models/{model_name}/{FOURIER}/weights/{model_name}.pth"
     )
     logger.info("Pesos finais salvos em models/%s/weights/%s.pth", model_name, model_name)
 
