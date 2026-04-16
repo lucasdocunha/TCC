@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import StepLR
+from torchvision import transforms
 
 import numpy as np
 
@@ -33,7 +34,7 @@ def run_xception():
     #configurações básicas para facilitar tudo
     PWD = Path.cwd()
     BATCH = 32
-    DEVICE  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    DEVICE  = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     logger.info("Dispositivo: %s | batch_size=%d | cwd=%s", DEVICE, BATCH, PWD)
 
 
@@ -50,11 +51,18 @@ def run_xception():
     )
 
 
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225])
+    ])
+
     #crio o dataset de imagens
     logger.info("Carregando ImageDataset (train, val, test)...")
-    train = ImageDataset(file_csv=f'{PWD}/data/raw/train.csv', images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/trainset')
-    val = ImageDataset(file_csv=f'{PWD}/data/raw/val.csv', images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/valset')
-    test = ImageDataset(file_csv=f'{PWD}/data/raw/test.csv', images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/testset')
+    train = ImageDataset(file_csv=f'{PWD}/data/raw/train.csv', images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/trainset', transform=transform)
+    val = ImageDataset(file_csv=f'{PWD}/data/raw/val.csv', images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/valset', transform=transform)
+    test = ImageDataset(file_csv=f'{PWD}/data/raw/test.csv', images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/testset', transform=transform)
     logger.info(
         "Datasets prontos: amostras train=%s, val=%s, test=%s",
         len(train),
@@ -140,7 +148,7 @@ def run_xception():
     #no scheduler, ao usar ele, ele identifica quando o modelo está aprendendo e quando está parando de aprender
     # vai ajustando a taxa de learning rate conforme isso, ajuda que o modelo a convergir
 
-    num_epochs = 100
+    num_epochs = 20
     best_val_loss = float('inf')
     best_path = f"models/{model_name}/weights/best_{model_name}.pth"
     os.makedirs(os.path.dirname(best_path), exist_ok=True)

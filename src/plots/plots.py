@@ -67,7 +67,7 @@ def plot_confusion_matrix(
     ax.set_yticklabels(["Negative (0)", "Positive (1)"], fontsize=10, va="center")
 
     # ── caixa de métricas ─────────────────────────────────────────────────────
-    metrics_text = (
+    """metrics_text = (
         f"Accuracy   : {acc:.4f}\n"
         f"Precision  : {precision:.4f}\n"
         f"Recall     : {recall:.4f}\n"
@@ -83,7 +83,7 @@ def plot_confusion_matrix(
         bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.8),
         fontfamily="monospace",
     )
-
+    """
     plt.tight_layout()
 
     save_dir = os.path.join(model_dir, "plots")
