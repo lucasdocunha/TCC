@@ -1,4 +1,4 @@
-from src.data import ImageDataset
+from src.data import ImageDataset, FourierMode
 from src.models import xception
 from src.plots import *
 
@@ -21,7 +21,8 @@ from sklearn.metrics import accuracy_score, precision_score, f1_score, roc_auc_s
 from scipy.special import softmax
 
 
-def run_xception():
+
+def run_xception(fourier: FourierMode = "none"):
 
     if not logging.root.handlers:
         logging.basicConfig(
@@ -61,7 +62,7 @@ def run_xception():
 
     #espefificações dos dados:
     DATA_LIMIT = np.inf
-    FOURIER = "none"
+    FOURIER = fourier if fourier != "none" else "none"
 
     train = ImageDataset(file_csv=f'{PWD}/data/raw/train.csv', 
         images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/trainset', 
