@@ -22,7 +22,7 @@ from scipy.special import softmax
 
 
 
-def run_xception(fourier: FourierMode = "none"):
+def run_xception(fourier: FourierMode = "none", epochs=10):
 
     if not logging.root.handlers:
         logging.basicConfig(
@@ -53,6 +53,7 @@ def run_xception(fourier: FourierMode = "none"):
 
     #isso é a normalização da imagem, varia de modelo para modelo
     transform = transforms.Compose([
+        transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                             std=[0.229, 0.224, 0.225])
     ])
@@ -176,7 +177,7 @@ def run_xception(fourier: FourierMode = "none"):
     #no scheduler, ao usar ele, ele identifica quando o modelo está aprendendo e quando está parando de aprender
     # vai ajustando a taxa de learning rate conforme isso, ajuda que o modelo a convergir
 
-    num_epochs = 20
+    num_epochs = epochs
     best_val_loss = float('inf')
     best_path = f"models/{model_name}/weights/best_{model_name}.pth"
     os.makedirs(os.path.dirname(best_path), exist_ok=True)

@@ -1,1 +1,1 @@
-from src.data.data import ImageDataset as ImageDataset
+from src.data.data import ImageDataset, FourierMode
