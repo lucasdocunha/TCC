@@ -107,7 +107,7 @@ class Xception(nn.Module):
     Xception optimized for the ImageNet dataset, as specified in
     https://arxiv.org/pdf/1610.02357.pdf
     """
-    def __init__(self, num_classes=1000):
+    def __init__(self, num_classes=1000, in_channels=3):
         """ Constructor
         Args:
             num_classes: number of classes
@@ -116,8 +116,9 @@ class Xception(nn.Module):
 
         
         self.num_classes = num_classes
+        self.in_channels = in_channels
 
-        self.conv1 = nn.Conv2d(3, 32, 3,2, 0, bias=False)
+        self.conv1 = nn.Conv2d(in_channels, 32, 3,2, 0, bias=False)
         self.bn1 = nn.BatchNorm2d(32)
         self.relu = nn.ReLU(inplace=True)
 
@@ -208,5 +209,25 @@ def xception(pretrained=False,**kwargs):
 
     model = Xception(**kwargs)
     if pretrained:
-        model.load_state_dict(model_zoo.load_url(model_urls['xception']))
+        state_dict = model_zoo.load_url(model_urls['xception'])
+        in_channels = kwargs.get("in_channels", 3)
+
+        if in_channels != 3:
+            conv1_weight = state_dict["conv1.weight"]  # [32, 3, 3, 3]
+
+            if in_channels == 1:
+                # cinza: média dos pesos RGB
+                conv1_weight = conv1_weight.mean(dim=1, keepdim=True)
+            elif in_channels > 3:
+                # mais canais (ex.: RGB + Fourier): repete e corta
+                repeat_factor = (in_channels + 2) // 3
+                conv1_weight = conv1_weight.repeat(1, repeat_factor, 1, 1)[:, :in_channels, :, :]
+                conv1_weight = conv1_weight * (3.0 / float(in_channels))
+            else:
+                # menos canais e diferente de 1 (ex.: 2 canais)
+                conv1_weight = conv1_weight[:, :in_channels, :, :]
+
+            state_dict["conv1.weight"] = conv1_weight
+
+        model.load_state_dict(state_dict, strict=False)
     return model

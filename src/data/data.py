@@ -3,44 +3,55 @@ import pandas as pd
 from PIL import Image
 import numpy as np
 from pathlib import Path
-from torchvision import transforms 
-import os 
+from torchvision import transforms
+import os
 import torch
 from typing import Literal
 
+FourierMode = Literal["none", "magnitude", "phase", "complex", "concat"]
+
+
 class ImageDataset(Dataset):
-    def __init__(self, file_csv:Path, images_dir:Path, transform:transforms.Compose|None=None, data_limit:int=np.inf, fourier:Literal["false", "true", "concat"]='false'):
+    def __init__(
+        self,
+        file_csv: Path,
+        images_dir: Path,
+        transform: transforms.Compose | None = None,
+        data_limit: int = np.inf,
+        fourier: FourierMode = "none",
+    ):
         self.images_dir = images_dir
         self.df = pd.read_csv(file_csv)
-        self.df = self.df if data_limit == np.inf else self.df.head(data_limit) #limitacao dos dados para testes
-        
-        #csv genérico, para ser adaptável para o pc de cada um 
-        self.df['img_name'] = self.df['img_name'].apply(lambda x: os.path.join(self.images_dir, x))
-        
+
+        self.df = self.df if data_limit == np.inf else self.df.head(data_limit)  #limitacao dos dados para testes
+
+        #csv genérico, para ser adaptável para o pc de cada um
+        self.df["img_name"] = self.df["img_name"].apply(lambda x: os.path.join(self.images_dir, x))
+
         #padrão da ImageNET -> outros modelos feitos em demais bases, possuem outros
-        self.transform = transform if transform else transforms.Compose([
-            transforms.Resize((128, 128)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            )
-        ])
+        self.spatial_transform = transforms.Compose([transforms.Resize((128, 128))])
+        self.to_tensor = transforms.ToTensor()
 
-        self.fourier = fourier
+        self.normalize = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+        )
 
-        
+        # mantém compatibilidade: se vier transform custom, usa no modo "none"
+        self.transform = transform
+        self.fourier: FourierMode = fourier
+
     def __len__(self):
         return len(self.df)
-    
-    
+
     #crio um iterador para pegar a imagem, label e a posição do dado
     def __getitem__(self, idx):
         img_path = self.df.iloc[idx, 0]
 
         try:
             with Image.open(img_path) as img:
-                img = img.convert('RGB')
+                img = img.convert("RGB")
+                img = self.spatial_transform(img)
 
         except Exception as e:
             print(f"Erro na imagem: {img_path} -> {e}")
@@ -49,28 +60,39 @@ class ImageDataset(Dataset):
         label = self.df.iloc[idx, 1]
 
         #1. aplica transform (sempre vira tensor)
-        image = self.transform(img)  # (C, H, W)
+        img_tensor = self.to_tensor(img)  # (C, H, W)
+        image = self.normalize(img_tensor) if self.transform is None else self.transform(img)
 
-        #2. Fourier
-        if self.fourier == 'true':
-            image = self._fourier(image)
+        #2. tipos de fourier que podem ser aplicados
+        if self.fourier == "none":
+            output = image
 
-        elif self.fourier == 'concat':
-            fft = self._fourier(image)
-            image = torch.cat([image, fft], dim=0)
+        elif self.fourier == "magnitude":
+            output = self._fft_magnitude(img_tensor)
 
-        return image, label, idx
+        elif self.fourier == "phase":
+            output = self._fft_phase(img_tensor)
 
-    def _fourier(self, img: torch.Tensor):
+        elif self.fourier == "complex":
+            output = self._fft_complex(img_tensor)
+
+        #3. concatenação dos tipos de fourier
+        elif self.fourier == "concat":
+            fft = self._fft_magnitude(img_tensor)
+            output = torch.cat([image, fft], dim=0)
+
+        return output, label, idx
+
+    def _to_grayscale(self, img: torch.Tensor):
         # img: (C, H, W)
 
         #converter para ciza
         if img.shape[0] == 3:
-            img = img.mean(dim=0)  # (H, W)
-        else:
-            img = img.squeeze(0)
+            return img.mean(dim=0)  # (H, W)
+        return img.squeeze(0)
 
-        img_np = img.numpy()
+    def _fft_magnitude(self, img: torch.Tensor):
+        img_np = self._to_grayscale(img).numpy()
 
         # FFT
         f = np.fft.fft2(img_np)
@@ -82,9 +104,31 @@ class ImageDataset(Dataset):
         magnitude = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-8)
 
         # tensor
-        magnitude = torch.tensor(magnitude, dtype=torch.float32).unsqueeze(0)
+        return torch.tensor(magnitude, dtype=torch.float32).unsqueeze(0)
 
-        return magnitude
+    def _fft_phase(self, img: torch.Tensor):
+        img_np = self._to_grayscale(img).numpy()
+        f = np.fft.fft2(img_np)
+        fshift = np.fft.fftshift(f)
+        phase = np.angle(fshift)
+        phase = (phase + np.pi) / (2 * np.pi)  # normaliza [-pi, pi] -> [0, 1]
+        return torch.tensor(phase, dtype=torch.float32).unsqueeze(0)
+
+    def _fft_complex(self, img: torch.Tensor):
+        img_np = self._to_grayscale(img).numpy()
+        f = np.fft.fft2(img_np)
+        fshift = np.fft.fftshift(f)
+
+        real = np.real(fshift)
+        imag = np.imag(fshift)
+
+        # normalização independente
+        real = (real - real.min()) / (real.max() - real.min() + 1e-8)
+        imag = (imag - imag.min()) / (imag.max() - imag.min() + 1e-8)
+
+        real = torch.tensor(real, dtype=torch.float32)
+        imag = torch.tensor(imag, dtype=torch.float32)
+        return torch.stack([real, imag], dim=0)
 
 
         

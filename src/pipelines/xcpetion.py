@@ -50,19 +50,38 @@ def run_xception():
         PERSISTENT_WORKERS,
     )
 
-
+    #isso é a normalização da imagem, varia de modelo para modelo
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                             std=[0.229, 0.224, 0.225])
     ])
 
     #crio o dataset de imagens
     logger.info("Carregando ImageDataset (train, val, test)...")
-    train = ImageDataset(file_csv=f'{PWD}/data/raw/train.csv', images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/trainset', transform=transform)
-    val = ImageDataset(file_csv=f'{PWD}/data/raw/val.csv', images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/valset', transform=transform)
-    test = ImageDataset(file_csv=f'{PWD}/data/raw/test.csv', images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/testset', transform=transform)
+
+    #espefificações dos dados:
+    DATA_LIMIT = np.inf
+    FOURIER = "none"
+
+    train = ImageDataset(file_csv=f'{PWD}/data/raw/train.csv', 
+        images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/trainset', 
+        transform=transform,
+        data_limit=DATA_LIMIT,
+        fourier=FOURIER)
+
+    
+    val = ImageDataset(file_csv=f'{PWD}/data/raw/val.csv', 
+    images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/valset', 
+    transform=transform,
+    data_limit=DATA_LIMIT,
+    fourier=FOURIER)
+
+    test = ImageDataset(file_csv=f'{PWD}/data/raw/test.csv', 
+    images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/testset', 
+    transform=transform,
+    data_limit=DATA_LIMIT,
+    fourier=FOURIER)
+
     logger.info(
         "Datasets prontos: amostras train=%s, val=%s, test=%s",
         len(train),
@@ -74,6 +93,7 @@ def run_xception():
     train_loader = DataLoader(train, batch_size=BATCH, num_workers=NUM_WORKERS, persistent_workers=PERSISTENT_WORKERS, pin_memory=PIN_MEMORY, shuffle=True)
     val_loader = DataLoader(val, batch_size=BATCH, num_workers=NUM_WORKERS, persistent_workers=PERSISTENT_WORKERS, pin_memory=PIN_MEMORY, shuffle=False) #shuffle só nos dados de treino e validação
     test_loader = DataLoader(test, batch_size=BATCH, num_workers=NUM_WORKERS, persistent_workers=PERSISTENT_WORKERS, pin_memory=PIN_MEMORY, shuffle=False)
+    
     logger.info(
         "DataLoaders criados: batches train=%d, val=%d, test=%d",
         len(train_loader),
@@ -85,8 +105,15 @@ def run_xception():
     #Configurações do modelo
 
     #modelo:
-    logger.info("Instanciando Xception pré-treinado e configurando transfer learning...")
-    model = xception(pretrained=True) #crio o modelo, pego ele pretreinado já -> aproveitar oq tem
+
+    #pego o primeiro dado do dataset para saber quantos canais de entrada o modelo vai ter
+    sample_x, _, _ = train[0]
+    in_channels = sample_x.shape[0]
+    logger.info(
+        "Instanciando Xception pré-treinado e configurando transfer learning... in_channels=%d",
+        in_channels,
+    )
+    model = xception(pretrained=True, in_channels=in_channels) #crio o modelo, pego ele pretreinado já -> aproveitar oq tem
     model_name = xception.__name__
     #aqui, quero fazer transfer learning (congelar as primeiras camadas do meu modelo e treinar somente as últimas camadas + parte do classificador)
     # o modelo pode ser dividido em duas partes:
@@ -306,7 +333,7 @@ def run_xception():
     )
         
     #agora vou salvar os resultados aqui:
-    model_dir = f'{PWD}/models/{model_name}'
+    model_dir = f'{PWD}/models/{model_name}/{FOURIER}'
 
     os.makedirs(os.path.join(model_dir, 'weights'), exist_ok=True)
     os.makedirs(os.path.join(model_dir, 'results'), exist_ok=True)
