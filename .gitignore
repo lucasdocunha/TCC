@@ -4,3 +4,6 @@
 */__pycache__/
 
 *.pth
+
+min_dataset
+*.zip
