@@ -1,0 +1,2 @@
+acc,precision,f1,auc,recall,specificity,tp,fp,fn,tn,Camadas descongeladas,Nº épocas
+0.575,0.5761523046092184,0.7301587301587301,0.5303047064173949,0.9965337954939342,0.0,575,423,2,0,3,2

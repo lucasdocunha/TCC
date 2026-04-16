@@ -22,7 +22,7 @@ from scipy.special import softmax
 
 
 
-def run_xception(fourier: FourierMode = "none", epochs=10):
+def run_xception(fourier: FourierMode = "none", epochs=10, raw_min=True):
 
     if not logging.root.handlers:
         logging.basicConfig(
@@ -65,20 +65,20 @@ def run_xception(fourier: FourierMode = "none", epochs=10):
     DATA_LIMIT = np.inf
     FOURIER = fourier if fourier != "none" else "none"
 
-    train = ImageDataset(file_csv=f'{PWD}/data/raw/train.csv', 
+    train = ImageDataset(file_csv=f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/train.csv", 
         images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/trainset', 
         transform=transform,
         data_limit=DATA_LIMIT,
         fourier=FOURIER)
 
     
-    val = ImageDataset(file_csv=f'{PWD}/data/raw/val.csv', 
+    val = ImageDataset(file_csv=f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/val.csv", 
     images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/valset', 
     transform=transform,
     data_limit=DATA_LIMIT,
     fourier=FOURIER)
 
-    test = ImageDataset(file_csv=f'{PWD}/data/raw/test.csv', 
+    test = ImageDataset(file_csv=f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/test.csv", 
     images_dir=f'/media/ssd2/lucas.ocunha/datasets/phase1/testset', 
     transform=transform,
     data_limit=DATA_LIMIT,
