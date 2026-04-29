@@ -98,7 +98,7 @@ def run_xception(fourier: FourierMode = "none", epochs=10, raw_min=True):
         {'params': model.conv4.parameters(), 'lr': 1e-4},
     ])
 
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler("cuda")
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.1, patience=4
@@ -126,7 +126,7 @@ def run_xception(fourier: FourierMode = "none", epochs=10, raw_min=True):
 
             optimizer.zero_grad()
 
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast("cuda"):
                 out = model(x)
                 out = torch.clamp(out, -20, 20)  # 🔥 evita explosão
                 loss = criterion(out, y)
@@ -172,7 +172,7 @@ def run_xception(fourier: FourierMode = "none", epochs=10, raw_min=True):
     # =========================
     # TESTE
     # =========================
-    model.load_state_dict(torch.load(best_path))
+    model.load_state_dict(torch.load(best_path, weights_only=True))
     model.eval()
 
     y_true, y_pred = [], []
@@ -194,13 +194,12 @@ def run_xception(fourier: FourierMode = "none", epochs=10, raw_min=True):
             y_true.extend(y.cpu().numpy())
             y_pred.extend(preds.cpu().numpy())
 
-            all_logits.append(out.detach().cpu())
+            # float32: softmax em float16 estoura exp(logit) para logits ~> ~11.5
+            all_logits.append(out.detach().float().cpu())
 
     logits = torch.cat(all_logits, dim=0)
 
-    # 🔥 softmax estável
     probs = torch.softmax(logits, dim=1)
-    probs = torch.nan_to_num(probs, nan=0.0)
 
     probs = probs[:, 1].cpu().numpy()
 
