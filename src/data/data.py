@@ -8,7 +8,17 @@ import os
 import torch
 from typing import Literal
 
-FourierMode = Literal["none", "magnitude", "phase", "complex", "concat"]
+FourierMode = Literal[
+    "none",
+    "magnitude",
+    "phase",
+    "complex",
+    "concat",
+    "frequency_1",
+    "frequency_2",
+    "frequency_3",
+    "concat_frequency",
+]
 
 
 class ImageDataset(Dataset):
@@ -19,9 +29,11 @@ class ImageDataset(Dataset):
         transform: transforms.Compose | None = None,
         data_limit: int = np.inf,
         fourier: FourierMode = "none",
+        spatial_size: tuple[int, int] | None = (128, 128),
     ):
         self.images_dir = images_dir
         self.df = pd.read_csv(file_csv)
+        self.df.columns = self.df.columns.str.strip()
 
         self.df = self.df if data_limit == np.inf else self.df.head(data_limit)  #limitacao dos dados para testes
 
@@ -29,13 +41,14 @@ class ImageDataset(Dataset):
         self.df["img_name"] = self.df["img_name"].apply(lambda x: os.path.join(self.images_dir, x))
 
         #padrão da ImageNET -> outros modelos feitos em demais bases, possuem outros
-        self.spatial_transform = transforms.Compose([transforms.Resize((128, 128))])
+        self.spatial_transform = transforms.Resize(spatial_size) if spatial_size is not None else None
         self.to_tensor = transforms.ToTensor()
 
         self.normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225],
         )
+        self.frequency_normalize = transforms.Normalize(mean=[0.5], std=[0.5])
 
         # mantém compatibilidade: se vier transform custom, usa no modo "none"
         self.transform = transform
@@ -51,7 +64,8 @@ class ImageDataset(Dataset):
         try:
             with Image.open(img_path) as img:
                 img = img.convert("RGB")
-                img = self.spatial_transform(img)
+                if self.spatial_transform is not None:
+                    img = self.spatial_transform(img)
 
         except Exception as e:
             print(f"Erro na imagem: {img_path} -> {e}")
@@ -67,19 +81,36 @@ class ImageDataset(Dataset):
         if self.fourier == "none":
             output = image
 
-        elif self.fourier == "magnitude":
-            output = self._fft_magnitude(img_tensor)
+        elif self.fourier in ("magnitude", "frequency_1"):
+            output = self.frequency_normalize(self._fft_magnitude(img_tensor))
 
-        elif self.fourier == "phase":
-            output = self._fft_phase(img_tensor)
+        elif self.fourier in ("phase", "frequency_2"):
+            output = self.frequency_normalize(self._fft_phase(img_tensor))
 
         elif self.fourier == "complex":
             output = self._fft_complex(img_tensor)
 
+        elif self.fourier == "frequency_3":
+            output = self.frequency_normalize(self._fft_highpass(img_tensor))
+
         #3. concatenação dos tipos de fourier
         elif self.fourier == "concat":
-            fft = self._fft_magnitude(img_tensor)
+            fft = self.frequency_normalize(self._fft_magnitude(img_tensor))
             output = torch.cat([image, fft], dim=0)
+
+        elif self.fourier == "concat_frequency":
+            fft = torch.cat(
+                [
+                    self.frequency_normalize(self._fft_magnitude(img_tensor)),
+                    self.frequency_normalize(self._fft_phase(img_tensor)),
+                    self.frequency_normalize(self._fft_highpass(img_tensor)),
+                ],
+                dim=0,
+            )
+            output = torch.cat([image, fft], dim=0)
+
+        else:
+            raise ValueError(f"Modo de Fourier inválido: {self.fourier}")
 
         return output, label, idx
 
@@ -129,6 +160,20 @@ class ImageDataset(Dataset):
         real = torch.tensor(real, dtype=torch.float32)
         imag = torch.tensor(imag, dtype=torch.float32)
         return torch.stack([real, imag], dim=0)
+
+    def _fft_highpass(self, img: torch.Tensor):
+        img_np = self._to_grayscale(img).numpy()
+        fshift = np.fft.fftshift(np.fft.fft2(img_np))
+
+        height, width = fshift.shape
+        y, x = np.ogrid[:height, :width]
+        center_y, center_x = height // 2, width // 2
+        radius = min(height, width) * 0.12
+        mask = ((y - center_y) ** 2 + (x - center_x) ** 2) >= radius**2
+
+        highpass = np.log1p(np.abs(fshift) * mask)
+        highpass = (highpass - highpass.min()) / (highpass.max() - highpass.min() + 1e-8)
+        return torch.tensor(highpass, dtype=torch.float32).unsqueeze(0)
 
 
         
