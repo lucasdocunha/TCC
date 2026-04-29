@@ -1,4 +1,5 @@
 from src.data import ImageDataset, FourierMode
+from src.data.paths import phase1_split_root
 from src.models import xception
 from src.plots import *
 
@@ -53,7 +54,7 @@ def run_xception(
 
     train = ImageDataset(
         f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/train.csv",
-        '/media/ssd2/lucas.ocunha/datasets/phase1/trainset',
+        str(phase1_split_root("train")),
         transform,
         data_limit,
         FOURIER,
@@ -61,7 +62,7 @@ def run_xception(
 
     val = ImageDataset(
         f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/val.csv",
-        '/media/ssd2/lucas.ocunha/datasets/phase1/valset',
+        str(phase1_split_root("val")),
         transform,
         data_limit,
         FOURIER,
@@ -69,7 +70,7 @@ def run_xception(
 
     test = ImageDataset(
         f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/test.csv",
-        '/media/ssd2/lucas.ocunha/datasets/phase1/testset',
+        str(phase1_split_root("test")),
         transform,
         data_limit,
         FOURIER,

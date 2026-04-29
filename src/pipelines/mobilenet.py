@@ -20,6 +20,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from src.data import ALL_FOURIER_MODES, FourierMode, ImageDataset
+from src.data.paths import phase1_split_root
 from src.models.mobilenet import freeze_classifier_only, mobilenet, unfreeze_last_blocks
 from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
@@ -37,11 +38,9 @@ def _amp_context(device: torch.device):
     return nullcontext()
 
 
-def _split_root(pwd: Path, raw_min: bool, split: str) -> Path:
-    if raw_min:
-        return pwd / "min_dataset" / split
-    names = {"train": "trainset", "val": "valset", "test": "testset"}
-    return Path("/media/ssd2/lucas.ocunha/datasets/phase1") / names[split]
+def _split_root(_pwd: Path, _raw_min: bool, split: str) -> Path:
+    """Imagens sempre em phase1/{trainset,valset,testset}; só o CSV muda (raw_min vs raw)."""
+    return phase1_split_root(split)
 
 
 def _transforms(image_size: int, augment: bool = True):
