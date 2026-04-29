@@ -18,7 +18,14 @@ logger = logging.getLogger(__name__)
 from sklearn.metrics import accuracy_score, precision_score, f1_score, roc_auc_score
 
 
-def run_xception(fourier: FourierMode = "none", epochs=10, raw_min=True):
+def run_xception(
+    fourier: FourierMode = "none",
+    epochs=10,
+    raw_min=True,
+    data_limit: int | float = np.inf,
+    batch_size: int = 32,
+    num_workers: int = 4,
+):
 
     if not logging.root.handlers:
         logging.basicConfig(
@@ -29,12 +36,12 @@ def run_xception(fourier: FourierMode = "none", epochs=10, raw_min=True):
     logger.info("Iniciando run_xception")
 
     PWD = Path.cwd()
-    BATCH = 32
-    DEVICE  = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    BATCH = batch_size
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    NUM_WORKERS = 4
-    PIN_MEMORY = True
-    PERSISTENT_WORKERS = True
+    NUM_WORKERS = num_workers
+    PIN_MEMORY = DEVICE.type == "cuda"
+    PERSISTENT_WORKERS = NUM_WORKERS > 0
 
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -42,20 +49,31 @@ def run_xception(fourier: FourierMode = "none", epochs=10, raw_min=True):
                             std=[0.229, 0.224, 0.225])
     ])
 
-    DATA_LIMIT = np.inf
     FOURIER = fourier
 
-    train = ImageDataset(f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/train.csv",
-                         '/media/ssd2/lucas.ocunha/datasets/phase1/trainset',
-                         transform, DATA_LIMIT, FOURIER)
+    train = ImageDataset(
+        f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/train.csv",
+        '/media/ssd2/lucas.ocunha/datasets/phase1/trainset',
+        transform,
+        data_limit,
+        FOURIER,
+    )
 
-    val = ImageDataset(f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/val.csv",
-                       '/media/ssd2/lucas.ocunha/datasets/phase1/valset',
-                       transform, DATA_LIMIT, FOURIER)
+    val = ImageDataset(
+        f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/val.csv",
+        '/media/ssd2/lucas.ocunha/datasets/phase1/valset',
+        transform,
+        data_limit,
+        FOURIER,
+    )
 
-    test = ImageDataset(f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/test.csv",
-                        '/media/ssd2/lucas.ocunha/datasets/phase1/testset',
-                        transform, DATA_LIMIT, FOURIER)
+    test = ImageDataset(
+        f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/test.csv",
+        '/media/ssd2/lucas.ocunha/datasets/phase1/testset',
+        transform,
+        data_limit,
+        FOURIER,
+    )
 
     train_loader = DataLoader(train, batch_size=BATCH, num_workers=NUM_WORKERS,
                               persistent_workers=PERSISTENT_WORKERS,
@@ -98,7 +116,7 @@ def run_xception(fourier: FourierMode = "none", epochs=10, raw_min=True):
         {'params': model.conv4.parameters(), 'lr': 1e-4},
     ])
 
-    scaler = torch.amp.GradScaler("cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=DEVICE.type == "cuda")
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.1, patience=4
@@ -126,7 +144,7 @@ def run_xception(fourier: FourierMode = "none", epochs=10, raw_min=True):
 
             optimizer.zero_grad()
 
-            with torch.amp.autocast("cuda"):
+            with torch.amp.autocast("cuda", enabled=DEVICE.type == "cuda"):
                 out = model(x)
                 out = torch.clamp(out, -20, 20)  # 🔥 evita explosão
                 loss = criterion(out, y)

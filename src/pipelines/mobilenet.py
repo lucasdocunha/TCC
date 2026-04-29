@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import transforms
 from tqdm import tqdm
 
-from src.data import FourierMode, ImageDataset
+from src.data import ALL_FOURIER_MODES, FourierMode, ImageDataset
 from src.models.mobilenet import freeze_classifier_only, mobilenet, unfreeze_last_blocks
 from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
@@ -480,5 +480,6 @@ def run_mobilenet(
 
 
 def run_all_mobilenet_modes(**kwargs):
-    modes = ("none", "frequency_1", "frequency_2", "frequency_3", "concat_frequency")
-    return {mode: run_mobilenet(input_mode=mode, **kwargs) for mode in modes}
+    return {
+        mode: run_mobilenet(input_mode=mode, **kwargs) for mode in ALL_FOURIER_MODES
+    }
