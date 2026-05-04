@@ -26,6 +26,7 @@ from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
 logger = logging.getLogger(__name__)
 MobileNetVariant = Literal["small", "large"]
+_LOGIT_LIMIT = 80.0
 
 
 def _device() -> torch.device:
@@ -108,9 +109,39 @@ def _class_balance(
 
 
 def _safe_auc(y_true: np.ndarray, probs: np.ndarray) -> float:
+    probs = np.asarray(probs, dtype=np.float64)
+    y_true = np.asarray(y_true)
+    finite_mask = np.isfinite(probs)
+    if not finite_mask.all():
+        dropped = int((~finite_mask).sum())
+        logger.warning("Ignoring %d non-finite probabilities while computing AUC.", dropped)
+        probs = probs[finite_mask]
+        y_true = y_true[finite_mask]
+    if len(y_true) == 0:
+        return 0.0
     if len(np.unique(y_true)) < 2:
         return 0.0
     return float(roc_auc_score(y_true, probs))
+
+
+def _sanitize_inputs(x: torch.Tensor) -> torch.Tensor:
+    if torch.isfinite(x).all():
+        return x
+    logger.warning("Replacing non-finite values in evaluation inputs.")
+    return torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
+
+
+def _sanitize_logits(logits: torch.Tensor) -> torch.Tensor:
+    logits = logits.float()
+    if torch.isfinite(logits).all():
+        return logits
+    logger.warning("Replacing non-finite logits before loss/metric computation.")
+    return torch.nan_to_num(
+        logits,
+        nan=0.0,
+        posinf=_LOGIT_LIMIT,
+        neginf=-_LOGIT_LIMIT,
+    ).clamp(min=-_LOGIT_LIMIT, max=_LOGIT_LIMIT)
 
 
 def _evaluate(model, loader, criterion, device, threshold: float = 0.5):
@@ -119,11 +150,12 @@ def _evaluate(model, loader, criterion, device, threshold: float = 0.5):
 
     with torch.no_grad():
         for x, y, idx in tqdm(loader, desc="Eval", leave=False):
-            x = x.to(device)
+            x = _sanitize_inputs(x.to(device))
             y = y.to(device)
             with _amp_context(device):
                 out = model(x)
-                loss = criterion(out, y)
+            out = _sanitize_logits(out)
+            loss = criterion(out, y)
 
             losses.append(float(loss.item()))
             y_true.extend(y.cpu().numpy().tolist())
@@ -132,6 +164,7 @@ def _evaluate(model, loader, criterion, device, threshold: float = 0.5):
 
     logits = np.concatenate(all_logits)
     probs = softmax(logits, axis=1)[:, 1]
+    probs = np.nan_to_num(probs, nan=0.5, posinf=1.0, neginf=0.0)
     y_true = np.asarray(y_true)
     y_pred = (probs >= threshold).astype(int)
 
@@ -419,7 +452,7 @@ def run_mobilenet(
                 logger.info("Early stopping at epoch %d", epoch)
                 break
 
-    model.load_state_dict(torch.load(best_path, map_location=device))
+    model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
     test_results = _evaluate(
         model, test_loader, criterion, device, threshold=best_threshold
     )
