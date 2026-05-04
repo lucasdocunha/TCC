@@ -1,0 +1,2 @@
+acc,precision,f1,auc,recall,specificity,model,variant,input_mode,in_channels,image_size,epochs_requested,epochs_run,best_val_auc,threshold,threshold_metric,pretrained,last_n_blocks,warmup_epochs,use_weighted_sampler,use_class_weights,label_smoothing,learning_rate_classifier,learning_rate_backbone,augment
+0.6729322275168044,0.6843464245773304,0.7366310692931716,0.7412816995763603,0.7975657674062006,0.5053478003144248,mobilenetv3_large,large,magnitude,1,224,50,11,0.7994720809865178,0.3510885536670685,accuracy,True,4,1,True,False,0.0,0.001,3e-05,True

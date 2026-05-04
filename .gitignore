@@ -8,5 +8,7 @@
 min_dataset
 *.zip
 
-/models/
-/models/*
+*.pth
+*.pt
+*.npz
+*.npy

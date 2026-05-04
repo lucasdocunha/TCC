@@ -18,10 +18,10 @@ from src.pipelines.xcpetion import run_xception
 
 logger = logging.getLogger(__name__)
 
-EPOCHS = 2
-RAW_MIN = True
+EPOCHS = 50
+RAW_MIN = False
 RUN_VIT = True
-BATCH_SIZE = 24
+BATCH_SIZE = 32
 NUM_WORKERS = 4
 
 

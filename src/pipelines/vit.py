@@ -148,7 +148,7 @@ def run_vit():
     scaler = torch.amp.GradScaler("cuda")
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=6)
     logger.info("AdamW, CrossEntropyLoss ponderada, AMP GradScaler e ReduceLROnPlateau configurados.")
-    num_epochs = 20
+    num_epochs = 50
     best_val_auc = 0.0
     epochs_no_improve = 0
     best_path = f"models/{MODEL_NAME}/weights/best_{MODEL_NAME}.pth"
