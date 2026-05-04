@@ -1,235 +1,380 @@
-from src.data import ImageDataset, FourierMode
-from src.data.paths import phase1_split_root
-from src.models import xception
-from src.plots import *
-
 import logging
-import torch 
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from torchvision import transforms
+from pathlib import Path
 
 import numpy as np
-import tqdm 
-from pathlib import Path
-import os
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, WeightedRandomSampler
+from torchvision import transforms
+import tqdm
+
+from src.data import ALL_FOURIER_MODES, FourierMode, ImageDataset
+from src.data.paths import phase1_split_root
+from src.models import xception
+from src.pipelines.evaluation import (
+    ThresholdMetric,
+    amp_context,
+    best_threshold,
+    binary_metrics,
+    checkpoint_score,
+    evaluate_classifier,
+    sanitize_inputs,
+    sanitize_logits,
+)
+from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
 logger = logging.getLogger(__name__)
 
-from sklearn.metrics import accuracy_score, precision_score, f1_score, roc_auc_score
+
+def _device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _split_root(_pwd: Path, _raw_min: bool, split: str) -> Path:
+    return phase1_split_root(split)
+
+
+def _transforms(image_size: int, augment: bool = True):
+    mean = [0.5, 0.5, 0.5]
+    std = [0.5, 0.5, 0.5]
+    if augment:
+        train_transform = transforms.Compose(
+            [
+                transforms.RandomResizedCrop(
+                    image_size, scale=(0.82, 1.0), ratio=(0.9, 1.1)
+                ),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomApply(
+                    [
+                        transforms.ColorJitter(
+                            brightness=0.12, contrast=0.12, saturation=0.08, hue=0.015
+                        )
+                    ],
+                    p=0.5,
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ]
+        )
+    else:
+        train_transform = transforms.Compose(
+            [
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ]
+        )
+    eval_transform = transforms.Compose(
+        [
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ]
+    )
+    return train_transform, eval_transform
+
+
+def _class_balance(
+    csv_path: Path,
+) -> tuple[torch.Tensor, WeightedRandomSampler, dict[int, int]]:
+    df = pd.read_csv(csv_path)
+    df.columns = df.columns.str.strip()
+    class_counts = df["target"].value_counts().sort_index()
+    counts = {int(k): int(v) for k, v in class_counts.to_dict().items()}
+    total = len(df)
+
+    loss_weights = torch.tensor(
+        [total / (2.0 * counts.get(0, 1)), total / (2.0 * counts.get(1, 1))],
+        dtype=torch.float,
+    )
+    sample_weights = (
+        df["target"].map({0: 1.0 / counts.get(0, 1), 1: 1.0 / counts.get(1, 1)}).values
+    )
+    sampler = WeightedRandomSampler(
+        weights=torch.tensor(sample_weights, dtype=torch.float),
+        num_samples=len(df),
+        replacement=True,
+    )
+    return loss_weights, sampler, counts
+
+
+def _set_trainable_head(model: nn.Module) -> None:
+    for param in model.parameters():
+        param.requires_grad = False
+
+    trainable_modules = [
+        model.block12,
+        model.conv3,
+        model.bn3,
+        model.conv4,
+        model.bn4,
+        model.fc,
+    ]
+    for module in trainable_modules:
+        for param in module.parameters():
+            param.requires_grad = True
 
 
 def run_xception(
     fourier: FourierMode = "none",
-    epochs=10,
-    raw_min=True,
-    data_limit: int | float = np.inf,
+    epochs: int = 20,
+    raw_min: bool = True,
+    data_limit: int | float | None = None,
+    output_root: str | Path | None = None,
     batch_size: int = 32,
     num_workers: int = 4,
+    pretrained: bool = True,
+    image_size: int = 299,
+    learning_rate_head: float = 1e-3,
+    learning_rate_backbone: float = 1e-4,
+    weight_decay: float = 1e-4,
+    early_stop_patience: int = 8,
+    use_weighted_sampler: bool = True,
+    use_class_weights: bool = False,
+    label_smoothing: float = 0.0,
+    threshold_metric: ThresholdMetric = "accuracy",
+    augment: bool = True,
+    seed: int = 42,
+    max_grad_norm: float | None = 1.0,
 ):
-
     if not logging.root.handlers:
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         )
 
-    logger.info("Iniciando run_xception")
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
-    PWD = Path.cwd()
-    BATCH = batch_size
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    pwd = Path.cwd()
+    output_root = Path(output_root) if output_root is not None else pwd
+    data_limit = np.inf if data_limit is None else data_limit
+    data_dir = pwd / "data" / ("raw_min" if raw_min else "raw")
+    device = _device()
+    pin_memory = device.type == "cuda"
+    persistent_workers = num_workers > 0
+    model_name = "xception"
+    run_dir = fourier if data_limit == np.inf else f"{fourier}_limit{data_limit}"
+    model_dir = output_root / "models" / model_name / run_dir
 
-    NUM_WORKERS = num_workers
-    PIN_MEMORY = DEVICE.type == "cuda"
-    PERSISTENT_WORKERS = NUM_WORKERS > 0
-
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                            std=[0.229, 0.224, 0.225])
-    ])
-
-    FOURIER = fourier
+    effective_augment = augment and fourier == "none"
+    train_transform, eval_transform = _transforms(image_size, augment=effective_augment)
+    spatial_size = (image_size, image_size) if fourier != "none" else None
 
     train = ImageDataset(
-        f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/train.csv",
-        str(phase1_split_root("train")),
-        transform,
-        data_limit,
-        FOURIER,
+        file_csv=data_dir / "train.csv",
+        images_dir=_split_root(pwd, raw_min, "train"),
+        transform=train_transform,
+        data_limit=data_limit,
+        fourier=fourier,
+        spatial_size=spatial_size,
     )
-
     val = ImageDataset(
-        f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/val.csv",
-        str(phase1_split_root("val")),
-        transform,
-        data_limit,
-        FOURIER,
+        file_csv=data_dir / "val.csv",
+        images_dir=_split_root(pwd, raw_min, "val"),
+        transform=eval_transform,
+        data_limit=data_limit,
+        fourier=fourier,
+        spatial_size=spatial_size,
     )
-
     test = ImageDataset(
-        f"{PWD}/data/{'raw_min' if raw_min else 'raw'}/test.csv",
-        str(phase1_split_root("test")),
-        transform,
-        data_limit,
-        FOURIER,
+        file_csv=data_dir / "test.csv",
+        images_dir=_split_root(pwd, raw_min, "test"),
+        transform=eval_transform,
+        data_limit=data_limit,
+        fourier=fourier,
+        spatial_size=spatial_size,
     )
 
-    train_loader = DataLoader(train, batch_size=BATCH, num_workers=NUM_WORKERS,
-                              persistent_workers=PERSISTENT_WORKERS,
-                              pin_memory=PIN_MEMORY, shuffle=True)
+    loss_weights, sampler, class_counts = _class_balance(data_dir / "train.csv")
+    if data_limit != np.inf or not use_weighted_sampler:
+        sampler = None
 
-    val_loader = DataLoader(val, batch_size=BATCH, num_workers=NUM_WORKERS,
-                            persistent_workers=PERSISTENT_WORKERS,
-                            pin_memory=PIN_MEMORY, shuffle=False)
-
-    test_loader = DataLoader(test, batch_size=BATCH, num_workers=NUM_WORKERS,
-                             persistent_workers=PERSISTENT_WORKERS,
-                             pin_memory=PIN_MEMORY, shuffle=False)
+    loader_kwargs = {
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": persistent_workers,
+    }
+    train_loader = DataLoader(
+        train, sampler=sampler, shuffle=sampler is None, **loader_kwargs
+    )
+    val_loader = DataLoader(val, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(test, shuffle=False, **loader_kwargs)
 
     sample_x, _, _ = train[0]
-    in_channels = sample_x.shape[0]
+    model = xception(
+        pretrained=pretrained,
+        in_channels=sample_x.shape[0],
+        num_classes=2,
+    )
+    _set_trainable_head(model)
+    model = model.to(device)
 
-    model = xception(pretrained=True, in_channels=in_channels)
-
-    for param in model.parameters():
-        param.requires_grad = False
-
-    for param in model.block12.parameters():
-        param.requires_grad = True
-
-    for param in model.conv3.parameters():
-        param.requires_grad = True
-
-    for param in model.conv4.parameters():
-        param.requires_grad = True
-
-    model.fc = nn.Linear(2048, 2)
-    model = model.to(DEVICE)
-
-    criterion = nn.CrossEntropyLoss()
-
-    optimizer = torch.optim.Adam([
-        {'params': model.fc.parameters(), 'lr': 1e-3},
-        {'params': model.block12.parameters(), 'lr': 1e-4},
-        {'params': model.conv3.parameters(), 'lr': 1e-4},
-        {'params': model.conv4.parameters(), 'lr': 1e-4},
-    ])
-
-    scaler = torch.amp.GradScaler("cuda", enabled=DEVICE.type == "cuda")
-
+    criterion = nn.CrossEntropyLoss(
+        weight=loss_weights.to(device) if use_class_weights else None,
+        label_smoothing=label_smoothing,
+    )
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": model.fc.parameters(), "lr": learning_rate_head},
+            {"params": model.block12.parameters(), "lr": learning_rate_backbone},
+            {"params": model.conv3.parameters(), "lr": learning_rate_backbone},
+            {"params": model.bn3.parameters(), "lr": learning_rate_backbone},
+            {"params": model.conv4.parameters(), "lr": learning_rate_backbone},
+            {"params": model.bn4.parameters(), "lr": learning_rate_backbone},
+        ],
+        weight_decay=weight_decay,
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.1, patience=4
+        optimizer, mode="max", factor=0.5, patience=3
+    )
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+
+    logger.info(
+        "Starting Xception: mode=%s channels=%d train=%d val=%d test=%d classes=%s device=%s",
+        fourier,
+        sample_x.shape[0],
+        len(train),
+        len(val),
+        len(test),
+        class_counts,
+        device,
     )
 
-    best_val_loss = float('inf')
-    best_path = f"models/xception/weights/best.pth"
-    os.makedirs(os.path.dirname(best_path), exist_ok=True)
+    best_score = -1.0
+    best_val_auc = 0.0
+    best_threshold_value = 0.5
+    epochs_without_improvement = 0
+    epochs_run = 0
+    best_path = model_dir / "weights" / f"best_{model_name}.pth"
+    best_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # =========================
-    # TREINO
-    # =========================
-    for epoch in tqdm.tqdm(range(epochs), desc="Epochs"):
-
+    for epoch in tqdm.tqdm(range(1, epochs + 1), desc="Epochs"):
         model.train()
-        train_loss = 0
+        train_loss, train_correct, train_total = 0.0, 0, 0
 
-        for img, label, _ in train_loader:
-            x = img.to(DEVICE)
-            y = label.to(DEVICE)
+        for x, y, _ in tqdm.tqdm(
+            train_loader, desc=f"Xception train {epoch}/{epochs}", leave=False
+        ):
+            x = sanitize_inputs(x.to(device))
+            y = y.to(device)
+            optimizer.zero_grad(set_to_none=True)
 
-            # 🔥 proteção
-            x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
-            x = torch.clamp(x, -5, 5)
-
-            optimizer.zero_grad()
-
-            with torch.amp.autocast("cuda", enabled=DEVICE.type == "cuda"):
+            with amp_context(device):
                 out = model(x)
-                out = torch.clamp(out, -20, 20)  # 🔥 evita explosão
-                loss = criterion(out, y)
+            out = sanitize_logits(out)
+            loss = criterion(out, y)
 
             scaler.scale(loss).backward()
+            if max_grad_norm is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
 
-            train_loss += loss.item()
+            train_loss += float(loss.item())
+            train_correct += int((out.argmax(1) == y).sum().item())
+            train_total += int(y.size(0))
 
-        train_loss /= len(train_loader)
+        epochs_run = epoch
+        val_base = evaluate_classifier(model, val_loader, criterion, device)
+        threshold, threshold_score = best_threshold(
+            val_base["y_true"], val_base["probs"], metric=threshold_metric
+        )
+        val_metrics = binary_metrics(
+            val_base["y_true"],
+            val_base["probs"],
+            threshold=threshold,
+            loss=val_base["loss"],
+            logits=val_base["logits"],
+            ids=val_base["ids"],
+        )
+        scheduler.step(val_metrics["auc"])
 
-        # =========================
-        # VALIDAÇÃO
-        # =========================
-        model.eval()
-        val_loss = 0
+        train_loss /= max(len(train_loader), 1)
+        train_acc = train_correct / max(train_total, 1)
+        logger.info(
+            "Epoch %d/%d | train_loss=%.4f train_acc=%.4f | val_loss=%.4f val_acc=%.4f val_auc=%.4f threshold=%.4f score=%.4f",
+            epoch,
+            epochs,
+            train_loss,
+            train_acc,
+            val_metrics["loss"],
+            val_metrics["acc"],
+            val_metrics["auc"],
+            threshold,
+            threshold_score,
+        )
 
-        with torch.no_grad():
-            for x, y, _ in val_loader:
-                x = x.to(DEVICE)
-                y = y.to(DEVICE)
-
-                x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
-                x = torch.clamp(x, -5, 5)
-
-                out = model(x)
-                out = torch.clamp(out, -20, 20)
-
-                loss = criterion(out, y)
-                val_loss += loss.item()
-
-        val_loss /= len(val_loader)
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        current_score = checkpoint_score(val_metrics)
+        if current_score > best_score:
+            best_score = current_score
+            best_val_auc = val_metrics["auc"]
+            best_threshold_value = threshold
+            epochs_without_improvement = 0
             torch.save(model.state_dict(), best_path)
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= early_stop_patience:
+                logger.info("Early stopping at epoch %d", epoch)
+                break
 
-        scheduler.step(val_loss)
+    model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
+    test_results = evaluate_classifier(
+        model, test_loader, criterion, device, threshold=best_threshold_value
+    )
 
-        print(f"Epoch {epoch+1}: train_loss={train_loss:.4f} val_loss={val_loss:.4f}")
+    (model_dir / "weights").mkdir(parents=True, exist_ok=True)
+    (model_dir / "results").mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        model_dir / "results" / "outputs.npz",
+        logits=test_results["logits"],
+        ids=test_results["ids"],
+        probs=test_results["probs"],
+        y_true=test_results["y_true"],
+        y_pred=test_results["y_pred"],
+    )
+    torch.save(model.state_dict(), model_dir / "weights" / f"{model_name}.pth")
 
-    # =========================
-    # TESTE
-    # =========================
-    model.load_state_dict(torch.load(best_path, weights_only=True))
-    model.eval()
+    plot_confusion_matrix(test_results, str(model_dir), f"{model_name} Confusion Matrix")
+    plot_roc_auc(test_results, str(model_dir), f"{model_name} ROC-AUC Curve")
+    save_metrics_csv(
+        test_results,
+        str(model_dir),
+        extra_info={
+            "model": model_name,
+            "fourier": fourier,
+            "in_channels": sample_x.shape[0],
+            "image_size": image_size,
+            "epochs_requested": epochs,
+            "epochs_run": epochs_run,
+            "best_val_auc": best_val_auc,
+            "threshold": best_threshold_value,
+            "threshold_metric": threshold_metric,
+            "pretrained": pretrained,
+            "use_weighted_sampler": use_weighted_sampler,
+            "use_class_weights": use_class_weights,
+            "label_smoothing": label_smoothing,
+            "learning_rate_head": learning_rate_head,
+            "learning_rate_backbone": learning_rate_backbone,
+            "augment": effective_augment,
+            "augment_requested": augment,
+        },
+    )
 
-    y_true, y_pred = [], []
-    all_logits = []
+    logger.info(
+        "Xception test: acc=%.4f precision=%.4f recall=%.4f f1=%.4f auc=%.4f specificity=%.4f",
+        test_results["acc"],
+        test_results["precision"],
+        test_results["recall"],
+        test_results["f1"],
+        test_results["auc"],
+        test_results["specificity"],
+    )
+    return test_results
 
-    with torch.no_grad():
-        for x, y, _ in test_loader:
-            x = x.to(DEVICE)
-            y = y.to(DEVICE)
 
-            x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
-            x = torch.clamp(x, -5, 5)
-
-            out = model(x)
-            out = torch.clamp(out, -20, 20)
-
-            preds = out.argmax(1)
-
-            y_true.extend(y.cpu().numpy())
-            y_pred.extend(preds.cpu().numpy())
-
-            # float32: softmax em float16 estoura exp(logit) para logits ~> ~11.5
-            all_logits.append(out.detach().float().cpu())
-
-    logits = torch.cat(all_logits, dim=0)
-
-    probs = torch.softmax(logits, dim=1)
-
-    probs = probs[:, 1].cpu().numpy()
-
-    print("NaN em probs?", np.isnan(probs).any())
-    print("Min/Max probs:", probs.min(), probs.max())
-
-    results = {
-        'acc': accuracy_score(y_true, y_pred),
-        'precision': precision_score(y_true, y_pred),
-        'f1': f1_score(y_true, y_pred),
-        'auc': roc_auc_score(y_true, probs)
-    }
-
-    print(results)
+def run_all_xception_modes(**kwargs):
+    return {mode: run_xception(fourier=mode, **kwargs) for mode in ALL_FOURIER_MODES}

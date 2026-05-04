@@ -46,6 +46,7 @@ def resnet(
                 new_weight = new_weight * (3.0 / float(in_channels))
             else:
                 new_weight = old_weight[:, :in_channels, :, :]
+                new_weight = new_weight * (3.0 / float(in_channels))
             new_conv.weight.data.copy_(new_weight)
         model.conv1 = new_conv
 

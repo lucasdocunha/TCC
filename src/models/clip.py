@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
 from torchvision import transforms 
-from transformers import CLIPModel, CLIPProcessor
 
 
 class CLIPVisionClassifier(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
+
+        from transformers import CLIPModel
 
         # Carrega só o vision encoder do CLIP
         clip = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
@@ -26,7 +27,7 @@ class CLIPVisionClassifier(nn.Module):
             nn.Linear(embed_dim, 512),
             nn.GELU(), #ViT usa GELU por padro
             nn.Dropout(0.3),
-            nn.Linear(512, 2)
+            nn.Linear(512, num_classes)
         )
 
     def forward(self, pixel_values):

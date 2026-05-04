@@ -7,14 +7,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from scipy.special import softmax
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import transforms
 import tqdm
@@ -22,6 +14,12 @@ import tqdm
 from src.data import FourierMode, ImageDataset
 from src.data.paths import phase1_split_root
 from src.models.resnet import freeze_backbone, resnet, unfreeze_last_blocks
+from src.pipelines.evaluation import (
+    binary_metrics,
+    best_threshold,
+    checkpoint_score,
+    evaluate_classifier,
+)
 from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
 logger = logging.getLogger(__name__)
@@ -115,80 +113,17 @@ def _class_weights(
 def _best_accuracy_threshold(
     y_true: np.ndarray, probs: np.ndarray
 ) -> tuple[float, float]:
-    thresholds = np.unique(np.concatenate(([0.0, 0.5, 1.0], probs)))
-    best_threshold = 0.5
-    best_acc = -1.0
-
-    for threshold in thresholds:
-        preds = (probs >= threshold).astype(int)
-        acc = accuracy_score(y_true, preds)
-        if acc > best_acc:
-            best_acc = acc
-            best_threshold = float(threshold)
-
-    return best_threshold, best_acc
+    return best_threshold(y_true, probs, metric="accuracy")
 
 
 def _best_youden_threshold(
     y_true: np.ndarray, probs: np.ndarray
 ) -> tuple[float, float]:
-    thresholds = np.unique(np.concatenate(([0.0, 0.5, 1.0], probs)))
-    best_threshold = 0.5
-    best_score = -1.0
-
-    for threshold in thresholds:
-        preds = (probs >= threshold).astype(int)
-        tn = int(((y_true == 0) & (preds == 0)).sum())
-        fp = int(((y_true == 0) & (preds == 1)).sum())
-        fn = int(((y_true == 1) & (preds == 0)).sum())
-        tp = int(((y_true == 1) & (preds == 1)).sum())
-        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-        score = sensitivity + specificity - 1.0
-        if score > best_score:
-            best_score = score
-            best_threshold = float(threshold)
-
-    return best_threshold, best_score
+    return best_threshold(y_true, probs, metric="youden")
 
 
 def _evaluate(model, loader, criterion, device, threshold: float = 0.5):
-    model.eval()
-    total_loss = 0.0
-    y_true, all_logits, all_ids = [], [], []
-
-    with torch.no_grad():
-        for x, y, idx in tqdm.tqdm(loader, desc="Eval", leave=False):
-            x = x.to(device)
-            y = y.to(device)
-
-            with _amp_context(device):
-                out = model(x)
-                loss = criterion(out, y)
-
-            total_loss += loss.item()
-            y_true.extend(y.cpu().numpy())
-            all_logits.append(out.detach().cpu().numpy().astype(np.float32))
-            all_ids.extend(idx.cpu().numpy())
-
-    logits = np.concatenate(all_logits)
-    probs = softmax(logits, axis=1)[:, 1]
-    y_true = np.array(y_true)
-    y_pred = (probs >= threshold).astype(int)
-
-    return {
-        "loss": total_loss / max(len(loader), 1),
-        "acc": accuracy_score(y_true, y_pred),
-        "precision": precision_score(y_true, y_pred, zero_division=0),
-        "recall": recall_score(y_true, y_pred, zero_division=0),
-        "f1": f1_score(y_true, y_pred, zero_division=0),
-        "auc": 0.0 if len(np.unique(y_true)) < 2 else roc_auc_score(y_true, probs),
-        "y_true": y_true,
-        "y_pred": y_pred,
-        "probs": probs,
-        "logits": logits,
-        "ids": np.array(all_ids),
-    }
+    return evaluate_classifier(model, loader, criterion, device, threshold=threshold)
 
 
 def run_resnet(
@@ -238,7 +173,8 @@ def run_resnet(
         device,
     )
 
-    train_transform, eval_transform = _transforms(image_size, augment=augment)
+    effective_augment = augment and fourier == "none"
+    train_transform, eval_transform = _transforms(image_size, augment=effective_augment)
     spatial_size = (image_size, image_size) if fourier != "none" else None
     data_dir = pwd / "data" / ("raw_min" if raw_min else "raw")
 
@@ -379,23 +315,28 @@ def run_resnet(
             train_correct += (out.argmax(1) == y).sum().item()
             train_total += y.size(0)
 
-        val_metrics = _evaluate(model, val_loader, criterion, device)
+        val_base = _evaluate(model, val_loader, criterion, device)
         if threshold_strategy == "accuracy":
             threshold, threshold_score = _best_accuracy_threshold(
-                val_metrics["y_true"], val_metrics["probs"]
+                val_base["y_true"], val_base["probs"]
             )
         elif threshold_strategy == "youden":
             threshold, threshold_score = _best_youden_threshold(
-                val_metrics["y_true"], val_metrics["probs"]
+                val_base["y_true"], val_base["probs"]
             )
         elif threshold_strategy == "fixed":
-            threshold, threshold_score = 0.5, val_metrics["acc"]
+            threshold, threshold_score = 0.5, val_base["acc"]
         else:
             raise ValueError(
                 "threshold_strategy must be 'accuracy', 'youden', or 'fixed'"
             )
-        val_metrics = _evaluate(
-            model, val_loader, criterion, device, threshold=threshold
+        val_metrics = binary_metrics(
+            val_base["y_true"],
+            val_base["probs"],
+            threshold=threshold,
+            loss=val_base["loss"],
+            logits=val_base["logits"],
+            ids=val_base["ids"],
         )
 
         scheduler.step(val_metrics["auc"])
@@ -415,11 +356,9 @@ def run_resnet(
             threshold_score,
         )
 
-        checkpoint_score = (
-            val_metrics["auc"] if val_metrics["auc"] > 0.0 else val_metrics["acc"]
-        )
-        if checkpoint_score > best_score:
-            best_score = checkpoint_score
+        current_score = checkpoint_score(val_metrics)
+        if current_score > best_score:
+            best_score = current_score
             best_val_auc = val_metrics["auc"]
             best_threshold = threshold
             epochs_without_improvement = 0
@@ -431,7 +370,7 @@ def run_resnet(
                 logger.info("Early stopping ativado na época %d.", epoch + 1)
                 break
 
-    model.load_state_dict(torch.load(best_path, map_location=device))
+    model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
     test_results = _evaluate(
         model, test_loader, criterion, device, threshold=best_threshold
     )
@@ -453,6 +392,8 @@ def run_resnet(
         logits=test_results["logits"],
         ids=test_results["ids"],
         probs=test_results["probs"],
+        y_true=test_results["y_true"],
+        y_pred=test_results["y_pred"],
     )
     torch.save(model.state_dict(), model_dir / "weights" / f"{model_name}.pth")
 
@@ -476,7 +417,8 @@ def run_resnet(
             "train_layer3": train_layer3,
             "use_weighted_sampler": use_weighted_sampler,
             "use_class_weights": use_class_weights,
-            "augment": augment,
+            "augment": effective_augment,
+            "augment_requested": augment,
             "threshold_strategy": threshold_strategy,
         },
     )

@@ -27,7 +27,7 @@ def test_resnet_classifier_accepts_extra_input_channels():
     assert out.shape == (2, 2)
 
 
-def test_resnet_pipeline_tiny_run_writes_metrics(tmp_path):
+def test_resnet_pipeline_tiny_run_writes_metrics(tmp_path, tiny_phase1_dataset):
     from src.pipelines.resnet import run_resnet
 
     results = run_resnet(

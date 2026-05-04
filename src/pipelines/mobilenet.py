@@ -7,14 +7,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from scipy.special import softmax
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import transforms
 from tqdm import tqdm
@@ -22,11 +14,18 @@ from tqdm import tqdm
 from src.data import ALL_FOURIER_MODES, FourierMode, ImageDataset
 from src.data.paths import phase1_split_root
 from src.models.mobilenet import freeze_classifier_only, mobilenet, unfreeze_last_blocks
+from src.pipelines.evaluation import (
+    ThresholdMetric,
+    best_threshold,
+    binary_metrics,
+    checkpoint_score,
+    evaluate_classifier,
+    safe_auc,
+)
 from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
 logger = logging.getLogger(__name__)
 MobileNetVariant = Literal["small", "large"]
-_LOGIT_LIMIT = 80.0
 
 
 def _device() -> torch.device:
@@ -109,122 +108,19 @@ def _class_balance(
 
 
 def _safe_auc(y_true: np.ndarray, probs: np.ndarray) -> float:
-    probs = np.asarray(probs, dtype=np.float64)
-    y_true = np.asarray(y_true)
-    finite_mask = np.isfinite(probs)
-    if not finite_mask.all():
-        dropped = int((~finite_mask).sum())
-        logger.warning("Ignoring %d non-finite probabilities while computing AUC.", dropped)
-        probs = probs[finite_mask]
-        y_true = y_true[finite_mask]
-    if len(y_true) == 0:
-        return 0.0
-    if len(np.unique(y_true)) < 2:
-        return 0.0
-    return float(roc_auc_score(y_true, probs))
-
-
-def _sanitize_inputs(x: torch.Tensor) -> torch.Tensor:
-    if torch.isfinite(x).all():
-        return x
-    logger.warning("Replacing non-finite values in evaluation inputs.")
-    return torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
-
-
-def _sanitize_logits(logits: torch.Tensor) -> torch.Tensor:
-    logits = logits.float()
-    if torch.isfinite(logits).all():
-        return logits
-    logger.warning("Replacing non-finite logits before loss/metric computation.")
-    return torch.nan_to_num(
-        logits,
-        nan=0.0,
-        posinf=_LOGIT_LIMIT,
-        neginf=-_LOGIT_LIMIT,
-    ).clamp(min=-_LOGIT_LIMIT, max=_LOGIT_LIMIT)
+    return safe_auc(y_true, probs)
 
 
 def _evaluate(model, loader, criterion, device, threshold: float = 0.5):
-    model.eval()
-    losses, y_true, all_logits, all_ids = [], [], [], []
-
-    with torch.no_grad():
-        for x, y, idx in tqdm(loader, desc="Eval", leave=False):
-            x = _sanitize_inputs(x.to(device))
-            y = y.to(device)
-            with _amp_context(device):
-                out = model(x)
-            out = _sanitize_logits(out)
-            loss = criterion(out, y)
-
-            losses.append(float(loss.item()))
-            y_true.extend(y.cpu().numpy().tolist())
-            all_logits.append(out.detach().cpu().numpy().astype(np.float32))
-            all_ids.extend(idx.cpu().numpy().tolist())
-
-    logits = np.concatenate(all_logits)
-    probs = softmax(logits, axis=1)[:, 1]
-    probs = np.nan_to_num(probs, nan=0.5, posinf=1.0, neginf=0.0)
-    y_true = np.asarray(y_true)
-    y_pred = (probs >= threshold).astype(int)
-
-    tn = int(((y_true == 0) & (y_pred == 0)).sum())
-    fp = int(((y_true == 0) & (y_pred == 1)).sum())
-    fn = int(((y_true == 1) & (y_pred == 0)).sum())
-    tp = int(((y_true == 1) & (y_pred == 1)).sum())
-
-    return {
-        "loss": float(np.mean(losses)) if losses else 0.0,
-        "acc": float(accuracy_score(y_true, y_pred)),
-        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
-        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
-        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
-        "auc": _safe_auc(y_true, probs),
-        "specificity": tn / (tn + fp) if (tn + fp) > 0 else 0.0,
-        "tp": tp,
-        "fp": fp,
-        "fn": fn,
-        "tn": tn,
-        "y_true": y_true,
-        "y_pred": y_pred,
-        "probs": probs,
-        "logits": logits,
-        "ids": np.asarray(all_ids),
-    }
+    return evaluate_classifier(model, loader, criterion, device, threshold=threshold)
 
 
 def _best_threshold(
     y_true: np.ndarray,
     probs: np.ndarray,
-    metric: Literal["accuracy", "youden", "f1", "balanced_accuracy"] = "accuracy",
+    metric: ThresholdMetric = "accuracy",
 ) -> tuple[float, float]:
-    thresholds = np.unique(np.concatenate(([0.0, 0.5, 1.0], probs)))
-    best_threshold = 0.5
-    best_score = -1.0
-
-    for threshold in thresholds:
-        y_pred = (probs >= threshold).astype(int)
-        tn = int(((y_true == 0) & (y_pred == 0)).sum())
-        fp = int(((y_true == 0) & (y_pred == 1)).sum())
-        fn = int(((y_true == 1) & (y_pred == 0)).sum())
-        tp = int(((y_true == 1) & (y_pred == 1)).sum())
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-
-        if metric == "f1":
-            score = float(f1_score(y_true, y_pred, zero_division=0))
-        elif metric == "balanced_accuracy":
-            score = (recall + specificity) / 2.0
-        elif metric == "youden":
-            score = recall + specificity - 1.0
-        else:
-            score = float(accuracy_score(y_true, y_pred))
-
-        if score > best_score:
-            best_score = score
-            best_threshold = float(threshold)
-
-    return best_threshold, best_score
+    return best_threshold(y_true, probs, metric=metric)
 
 
 def run_mobilenet(
@@ -281,7 +177,8 @@ def run_mobilenet(
     if last_n_blocks is None:
         last_n_blocks = 4 if variant == "small" else 3
 
-    train_transform, eval_transform = _transforms(image_size, augment=augment)
+    effective_augment = augment and input_mode == "none"
+    train_transform, eval_transform = _transforms(image_size, augment=effective_augment)
     spatial_size = (image_size, image_size) if input_mode != "none" else None
 
     train = ImageDataset(
@@ -417,8 +314,13 @@ def run_mobilenet(
             val_base["probs"],
             metric=threshold_metric,
         )
-        val_metrics = _evaluate(
-            model, val_loader, criterion, device, threshold=threshold
+        val_metrics = binary_metrics(
+            val_base["y_true"],
+            val_base["probs"],
+            threshold=threshold,
+            loss=val_base["loss"],
+            logits=val_base["logits"],
+            ids=val_base["ids"],
         )
         scheduler.step(val_metrics["auc"])
 
@@ -437,11 +339,9 @@ def run_mobilenet(
             threshold_score,
         )
 
-        checkpoint_score = (
-            val_metrics["auc"] if val_metrics["auc"] > 0.0 else val_metrics["acc"]
-        )
-        if checkpoint_score > best_score:
-            best_score = checkpoint_score
+        current_score = checkpoint_score(val_metrics)
+        if current_score > best_score:
+            best_score = current_score
             best_val_auc = val_metrics["auc"]
             best_threshold = threshold
             epochs_without_improvement = 0
@@ -495,7 +395,8 @@ def run_mobilenet(
             "label_smoothing": label_smoothing,
             "learning_rate_classifier": learning_rate_classifier,
             "learning_rate_backbone": learning_rate_backbone,
-            "augment": augment,
+            "augment": effective_augment,
+            "augment_requested": augment,
         },
     )
 

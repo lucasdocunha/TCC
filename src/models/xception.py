@@ -226,8 +226,12 @@ def xception(pretrained=False,**kwargs):
             else:
                 # menos canais e diferente de 1 (ex.: 2 canais)
                 conv1_weight = conv1_weight[:, :in_channels, :, :]
+                conv1_weight = conv1_weight * (3.0 / float(in_channels))
 
             state_dict["conv1.weight"] = conv1_weight
+        if kwargs.get("num_classes", 1000) != 1000:
+            state_dict.pop("fc.weight", None)
+            state_dict.pop("fc.bias", None)
 
         model.load_state_dict(state_dict, strict=False)
     return model

@@ -1,269 +1,406 @@
-from src.data import ImageDataset
-from src.plots import *
 import logging
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from transformers import ViTForImageClassification, ViTImageProcessor
 from torchvision import transforms
-import pandas as pd
-import numpy as np
 import tqdm
-from pathlib import Path
-import os
-from sklearn.metrics import accuracy_score, precision_score, f1_score, roc_auc_score, recall_score
-from scipy.special import softmax
+
+from src.data import ImageDataset
+from src.data.paths import phase1_split_root
+from src.pipelines.evaluation import (
+    ThresholdMetric,
+    amp_context,
+    best_threshold,
+    binary_metrics,
+    checkpoint_score,
+    evaluate_classifier,
+    sanitize_logits,
+)
+from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
 logger = logging.getLogger(__name__)
 
 
 class ViTTransform:
     def __init__(self, pretrained: str, augment: bool = False):
+        from transformers import ViTImageProcessor
+
         self.processor = ViTImageProcessor.from_pretrained(pretrained)
         self.augment = augment
-        self.aug = transforms.Compose([
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),
-            transforms.RandomRotation(20),
-            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-            transforms.RandomGrayscale(p=0.1),
-            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-        ])
+        self.aug = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomRotation(12),
+                transforms.ColorJitter(
+                    brightness=0.18,
+                    contrast=0.18,
+                    saturation=0.12,
+                    hue=0.02,
+                ),
+                transforms.RandomAffine(degrees=0, translate=(0.06, 0.06)),
+            ]
+        )
 
     def __call__(self, img):
         if self.augment:
             img = self.aug(img)
-        return self.processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
+        return self.processor(images=img, return_tensors="pt")[
+            "pixel_values"
+        ].squeeze(0)
 
 
 def collate_fn(batch):
     imgs, labels, idxs = zip(*batch)
-    imgs = torch.stack([torch.tensor(i) if not isinstance(i, torch.Tensor) else i for i in imgs])
+    imgs = torch.stack([i if isinstance(i, torch.Tensor) else torch.tensor(i) for i in imgs])
     labels = torch.tensor(labels, dtype=torch.long)
     idxs = torch.tensor(idxs, dtype=torch.long)
     return imgs, labels, idxs
 
 
-def mixup_batch(x, y, alpha=0.3):
-    lam = np.random.beta(alpha, alpha)
-    idx = torch.randperm(x.size(0)).to(x.device)
-    x_mix = lam * x + (1 - lam) * x[idx]
-    y_a, y_b = y, y[idx]
-    return x_mix, y_a, y_b, lam
+def _device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def mixup_criterion(criterion, out, y_a, y_b, lam):
-    return lam * criterion(out, y_a) + (1 - lam) * criterion(out, y_b)
+def _split_root(_pwd: Path, _raw_min: bool, split: str) -> Path:
+    return phase1_split_root(split)
 
 
-def run_vit():
-    if not logging.root.handlers:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+def _class_balance(
+    csv_path: Path,
+) -> tuple[torch.Tensor, WeightedRandomSampler, dict[int, int]]:
+    df = pd.read_csv(csv_path)
+    df.columns = df.columns.str.strip()
+    class_counts = df["target"].value_counts().sort_index()
+    counts = {int(k): int(v) for k, v in class_counts.to_dict().items()}
+    total = len(df)
 
-    logger.info("Iniciando run_vit (pipeline ViT).")
-    PWD = Path.cwd()
-    BATCH = 32
-    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    MODEL_NAME = "vit"
-    PRETRAINED = "google/vit-base-patch16-224"
-    EARLY_STOP_PATIENCE = 15
-    logger.info("Dispositivo: %s | batch_size=%d | cwd=%s", DEVICE, BATCH, PWD)
-    NUM_WORKERS = 4
-    PIN_MEMORY = True
-    PERSISTENT_WORKERS = True
-    logger.info("DataLoader: num_workers=%d, pin_memory=%s, persistent_workers=%s", NUM_WORKERS, PIN_MEMORY, PERSISTENT_WORKERS)
-    vit_transform_train = ViTTransform(PRETRAINED, augment=True)
-    vit_transform_eval  = ViTTransform(PRETRAINED, augment=False)
-    logger.info("Carregando ImageDataset (train, val, test)")
-    train = ImageDataset(
-        file_csv=f"{PWD}/data/raw/train.csv",
-        images_dir=f"/media/ssd2/lucas.ocunha/datasets/phase1/trainset",
-        transform=vit_transform_train,
+    loss_weights = torch.tensor(
+        [total / (2.0 * counts.get(0, 1)), total / (2.0 * counts.get(1, 1))],
+        dtype=torch.float,
     )
-    val = ImageDataset(
-        file_csv=f"{PWD}/data/raw/val.csv",
-        images_dir=f"/media/ssd2/lucas.ocunha/datasets/phase1/valset",
-        transform=vit_transform_eval,
+    sample_weights = (
+        df["target"].map({0: 1.0 / counts.get(0, 1), 1: 1.0 / counts.get(1, 1)}).values
     )
-    test = ImageDataset(
-        file_csv=f"{PWD}/data/raw/test.csv",
-        images_dir=f"/media/ssd2/lucas.ocunha/datasets/phase1/testset",
-        transform=vit_transform_eval,
-    )
-    logger.info("Datasets prontos: amostras train=%d, val=%d, test=%d", len(train), len(val), len(test))
-    train_df = pd.read_csv(f"{PWD}/data/raw/train.csv")
-    class_counts = train_df["target"].value_counts().sort_index()
-    sample_weights = train_df["target"].map({0: 1.0 / class_counts[0], 1: 1.0 / class_counts[1]}).values
     sampler = WeightedRandomSampler(
         weights=torch.tensor(sample_weights, dtype=torch.float),
-        num_samples=len(train_df),
+        num_samples=len(df),
         replacement=True,
     )
-    logger.info("WeightedRandomSampler criado: class_counts=%s", class_counts.to_dict())
-    train_loader = DataLoader(
-        train, batch_size=BATCH, num_workers=NUM_WORKERS,
-        persistent_workers=PERSISTENT_WORKERS, pin_memory=PIN_MEMORY,
-        sampler=sampler, collate_fn=collate_fn,
-    )
-    val_loader = DataLoader(
-        val, batch_size=BATCH, num_workers=NUM_WORKERS,
-        persistent_workers=PERSISTENT_WORKERS, pin_memory=PIN_MEMORY,
-        shuffle=False, collate_fn=collate_fn,
-    )
-    test_loader = DataLoader(
-        test, batch_size=BATCH, num_workers=NUM_WORKERS,
-        persistent_workers=PERSISTENT_WORKERS, pin_memory=PIN_MEMORY,
-        shuffle=False, collate_fn=collate_fn,
-    )
-    logger.info("DataLoaders criados: batches train=%d, val=%d, test=%d", len(train_loader), len(val_loader), len(test_loader))
-    logger.info("Instanciando ViT pré-treinado e configurando transfer learning")
-    model = ViTForImageClassification.from_pretrained(
-        PRETRAINED,
-        num_labels=2,
-        ignore_mismatched_sizes=True,
-    )
+    return loss_weights, sampler, counts
+
+
+def _vit_logits(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    return model(pixel_values=x).logits
+
+
+def _unfreeze_vit(model: nn.Module, last_n_layers: int) -> None:
     for param in model.parameters():
         param.requires_grad = False
-    for i in [-1, -2, -3]:
-        for param in model.vit.encoder.layer[i].parameters():
+
+    last_n_layers = max(0, min(last_n_layers, len(model.vit.encoder.layer)))
+    for layer in model.vit.encoder.layer[-last_n_layers:]:
+        for param in layer.parameters():
             param.requires_grad = True
     for param in model.vit.layernorm.parameters():
         param.requires_grad = True
-    model.classifier = nn.Sequential(nn.Dropout(p=0.1), nn.Linear(model.config.hidden_size, 2)).to(DEVICE)
-    logger.info("Últimos 6 encoder blocks, layernorm e classifier (com dropout) liberados.")
-    model = model.to(DEVICE)
-    logger.info("Modelo enviado para %s.", DEVICE)
-    w0 = np.sqrt(1000 / class_counts[0])
-    w1 = np.sqrt(1000 / class_counts[1])
-    weights = torch.tensor([w0, w1], dtype=torch.float).to(DEVICE)
-    criterion = nn.CrossEntropyLoss(weight=weights)
-    logger.info("CrossEntropyLoss com pesos suavizados: classe0=%.4f classe1=%.4f", w0, w1)
-    optimizer = torch.optim.AdamW([
-        {"params": model.classifier.parameters(), "lr": 1e-4, "weight_decay": 1e-2},
-        {"params": model.vit.layernorm.parameters(), "lr": 1e-5, "weight_decay": 1e-2},
-        {"params": model.vit.encoder.layer[-1].parameters(), "lr": 1e-5, "weight_decay": 1e-2},
-        {"params": model.vit.encoder.layer[-2].parameters(), "lr": 5e-6, "weight_decay": 1e-2},
-        {"params": model.vit.encoder.layer[-3].parameters(), "lr": 5e-6, "weight_decay": 1e-2},
-    ])
-    scaler = torch.amp.GradScaler("cuda")
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=6)
-    logger.info("AdamW, CrossEntropyLoss ponderada, AMP GradScaler e ReduceLROnPlateau configurados.")
-    num_epochs = 50
+    for param in model.classifier.parameters():
+        param.requires_grad = True
+
+
+def _optimizer(
+    model: nn.Module,
+    learning_rate_classifier: float,
+    learning_rate_backbone: float,
+    weight_decay: float,
+    last_n_layers: int,
+):
+    param_groups = [
+        {
+            "params": model.classifier.parameters(),
+            "lr": learning_rate_classifier,
+            "weight_decay": weight_decay,
+        },
+        {
+            "params": model.vit.layernorm.parameters(),
+            "lr": learning_rate_backbone,
+            "weight_decay": weight_decay,
+        },
+    ]
+    layers = model.vit.encoder.layer[-last_n_layers:] if last_n_layers > 0 else []
+    for offset, layer in enumerate(reversed(layers), start=1):
+        param_groups.append(
+            {
+                "params": layer.parameters(),
+                "lr": learning_rate_backbone / float(offset),
+                "weight_decay": weight_decay,
+            }
+        )
+    return torch.optim.AdamW(param_groups)
+
+
+def run_vit(
+    epochs: int = 50,
+    raw_min: bool = False,
+    data_limit: int | float | None = None,
+    output_root: str | Path | None = None,
+    batch_size: int = 32,
+    num_workers: int = 4,
+    pretrained_model: str = "google/vit-base-patch16-224",
+    learning_rate_classifier: float = 1e-4,
+    learning_rate_backbone: float = 1e-5,
+    weight_decay: float = 1e-2,
+    early_stop_patience: int = 12,
+    last_n_layers: int = 3,
+    use_weighted_sampler: bool = True,
+    use_class_weights: bool = True,
+    label_smoothing: float = 0.0,
+    threshold_metric: ThresholdMetric = "accuracy",
+    augment: bool = True,
+    seed: int = 42,
+    max_grad_norm: float | None = 1.0,
+):
+    if not logging.root.handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    pwd = Path.cwd()
+    output_root = Path(output_root) if output_root is not None else pwd
+    data_limit = np.inf if data_limit is None else data_limit
+    data_dir = pwd / "data" / ("raw_min" if raw_min else "raw")
+    device = _device()
+    pin_memory = device.type == "cuda"
+    persistent_workers = num_workers > 0
+    model_name = "vit"
+    run_dir = "none" if data_limit == np.inf else f"none_limit{data_limit}"
+    model_dir = output_root / "models" / model_name / run_dir
+
+    train_transform = ViTTransform(pretrained_model, augment=augment)
+    eval_transform = ViTTransform(pretrained_model, augment=False)
+
+    train = ImageDataset(
+        file_csv=data_dir / "train.csv",
+        images_dir=_split_root(pwd, raw_min, "train"),
+        transform=train_transform,
+        data_limit=data_limit,
+        fourier="none",
+        spatial_size=None,
+    )
+    val = ImageDataset(
+        file_csv=data_dir / "val.csv",
+        images_dir=_split_root(pwd, raw_min, "val"),
+        transform=eval_transform,
+        data_limit=data_limit,
+        fourier="none",
+        spatial_size=None,
+    )
+    test = ImageDataset(
+        file_csv=data_dir / "test.csv",
+        images_dir=_split_root(pwd, raw_min, "test"),
+        transform=eval_transform,
+        data_limit=data_limit,
+        fourier="none",
+        spatial_size=None,
+    )
+
+    loss_weights, sampler, class_counts = _class_balance(data_dir / "train.csv")
+    if data_limit != np.inf or not use_weighted_sampler:
+        sampler = None
+
+    loader_kwargs = {
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": persistent_workers,
+        "collate_fn": collate_fn,
+    }
+    train_loader = DataLoader(
+        train, sampler=sampler, shuffle=sampler is None, **loader_kwargs
+    )
+    val_loader = DataLoader(val, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(test, shuffle=False, **loader_kwargs)
+
+    from transformers import ViTForImageClassification
+
+    model = ViTForImageClassification.from_pretrained(
+        pretrained_model,
+        num_labels=2,
+        ignore_mismatched_sizes=True,
+    )
+    model.classifier = nn.Sequential(
+        nn.Dropout(p=0.1),
+        nn.Linear(model.config.hidden_size, 2),
+    )
+    _unfreeze_vit(model, last_n_layers=last_n_layers)
+    model = model.to(device)
+
+    criterion = nn.CrossEntropyLoss(
+        weight=loss_weights.to(device) if use_class_weights else None,
+        label_smoothing=label_smoothing,
+    )
+    optimizer = _optimizer(
+        model,
+        learning_rate_classifier=learning_rate_classifier,
+        learning_rate_backbone=learning_rate_backbone,
+        weight_decay=weight_decay,
+        last_n_layers=last_n_layers,
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=4
+    )
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+
+    logger.info(
+        "Starting ViT: model=%s train=%d val=%d test=%d classes=%s device=%s",
+        pretrained_model,
+        len(train),
+        len(val),
+        len(test),
+        class_counts,
+        device,
+    )
+
+    best_score = -1.0
     best_val_auc = 0.0
-    epochs_no_improve = 0
-    best_path = f"models/{MODEL_NAME}/weights/best_{MODEL_NAME}.pth"
-    os.makedirs(os.path.dirname(best_path), exist_ok=True)
-    logger.info("Iniciando treinamento: %d épocas. Melhor modelo salvo em %s", num_epochs, best_path)
-    epoch_bar = tqdm.tqdm(range(num_epochs), desc="Epochs")
-    for epoch in epoch_bar:
+    best_threshold_value = 0.5
+    epochs_without_improvement = 0
+    epochs_run = 0
+    best_path = model_dir / "weights" / f"best_{model_name}.pth"
+    best_path.parent.mkdir(parents=True, exist_ok=True)
+
+    for epoch in tqdm.tqdm(range(1, epochs + 1), desc="Epochs"):
         model.train()
-        train_loss, train_correct, train_total = 0, 0, 0
-        train_pbar = tqdm.tqdm(train_loader, desc=f"Train ep {epoch+1}/{num_epochs}", leave=False)
-        for img, label, _ in train_pbar:
-            x = img.to(DEVICE)
-            y = label.to(DEVICE)
+        train_loss, train_correct, train_total = 0.0, 0, 0
+
+        for x, y, _ in tqdm.tqdm(
+            train_loader, desc=f"ViT train {epoch}/{epochs}", leave=False
+        ):
+            x = x.to(device)
+            y = y.to(device)
             optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda"):
+
+            with amp_context(device):
                 out = model(pixel_values=x).logits
-                loss = criterion(out, y)
+            out = sanitize_logits(out)
+            loss = criterion(out, y)
+
             scaler.scale(loss).backward()
+            if max_grad_norm is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
-            train_loss += loss.item()
-            train_correct += (out.argmax(1) == y).sum().item()
-            train_total += y.size(0)
-            train_pbar.set_postfix(loss=f"{loss.item():.4f}")
-        train_loss /= len(train_loader)
-        train_acc = train_correct / train_total
-        model.eval()
-        val_loss, val_correct, val_total = 0, 0, 0
-        val_probs, val_true = [], []
-        with torch.no_grad():
-            val_pbar = tqdm.tqdm(val_loader, desc=f"Val ep {epoch+1}/{num_epochs}", leave=False)
-            for x, y, _ in val_pbar:
-                x = x.to(DEVICE)
-                y = y.to(DEVICE)
-                with torch.amp.autocast("cuda"):
-                    out = model(pixel_values=x).logits
-                    loss = criterion(out, y)
-                val_loss += loss.item()
-                val_correct += (out.argmax(1) == y).sum().item()
-                val_total += y.size(0)
-                probs = torch.softmax(out, dim=1)[:, 1]
-                val_probs.extend(probs.cpu().numpy())
-                val_true.extend(y.cpu().numpy())
-                val_pbar.set_postfix(loss=f"{loss.item():.4f}")
-        val_loss /= len(val_loader)
-        val_acc = val_correct / val_total
-        val_auc = roc_auc_score(val_true, val_probs)
-        if val_auc > best_val_auc:
-            best_val_auc = val_auc
-            epochs_no_improve = 0
-            torch.save(model.state_dict(), best_path)
-            logger.info("Época %d/%d: novo melhor val_auc=%.6f — checkpoint salvo em %s", epoch + 1, num_epochs, val_auc, best_path,)
-        else:
-            epochs_no_improve += 1
-            if epochs_no_improve >= EARLY_STOP_PATIENCE:
-                logger.info("Early stopping ativado na época %d.", epoch + 1)
-                break
-        scheduler.step(1 - val_auc)
-        epoch_bar.set_postfix(
-            train_loss=f"{train_loss:.4f}", train_acc=f"{train_acc:.4f}",
-            val_loss=f"{val_loss:.4f}", val_acc=f"{val_acc:.4f}",
-            val_auc=f"{val_auc:.4f}",
+
+            train_loss += float(loss.item())
+            train_correct += int((out.argmax(1) == y).sum().item())
+            train_total += int(y.size(0))
+
+        epochs_run = epoch
+        val_base = evaluate_classifier(
+            model, val_loader, criterion, device, forward_fn=_vit_logits
         )
-        logger.info("Época %d/%d concluída | train_loss=%.6f train_acc=%.6f | val_loss=%.6f val_acc=%.6f | val_auc=%.6f",
-                    epoch + 1, num_epochs, train_loss, train_acc, val_loss, val_acc, val_auc)
-    logger.info("Treino finalizado. Carregando melhores pesos de %s para avaliação no teste.", best_path)
-    model.load_state_dict(torch.load(best_path))
-    model.eval()
-    y_true, y_pred = [], []
-    all_logits, all_ids = [], []
-    with torch.no_grad():
-        for x, y, idx in tqdm.tqdm(test_loader, desc="Teste (inferência)"):
-            x = x.to(DEVICE)
-            y = y.to(DEVICE)
-            with torch.amp.autocast("cuda"):
-                out = model(pixel_values=x).logits
-            preds = out.argmax(1)
-            y_true.extend(y.cpu().numpy())
-            y_pred.extend(preds.cpu().numpy())
-            all_logits.append(out.detach().cpu().numpy().astype(np.float32))
-            all_ids.extend(idx.cpu().numpy())
-    logits = np.concatenate(all_logits)
-    probs  = softmax(logits, axis=1)[:, 1]
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
-    tn = int(((y_true == 0) & (y_pred == 0)).sum())
-    fp = int(((y_true == 0) & (y_pred == 1)).sum())
-    fn = int(((y_true == 1) & (y_pred == 0)).sum())
-    tp = int(((y_true == 1) & (y_pred == 1)).sum())
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-    test_results = {
-        "acc": accuracy_score(y_true, y_pred),
-        "precision": precision_score(y_true, y_pred),
-        "recall": recall_score(y_true, y_pred),
-        "f1": f1_score(y_true, y_pred),
-        "auc": roc_auc_score(y_true, probs),
-        "specificity": specificity,
-        "tp": tp, "fp": fp, "fn": fn, "tn": tn,
-        "y_true": y_true,
-        "y_pred": y_pred,
-        "logits": logits,
-        "ids": np.array(all_ids)
-    }
-    logger.info("Métricas no teste: acc=%.4f precision=%.4f recall=%.4f f1=%.4f auc=%.4f specificity=%.4f | tp=%d fp=%d fn=%d tn=%d",
-                test_results["acc"], test_results["precision"], test_results["recall"], test_results["f1"], test_results["auc"],
-                test_results["specificity"], tp, fp, fn, tn)
-    model_dir = f"{PWD}/models/{MODEL_NAME}"
-    os.makedirs(os.path.join(model_dir, "weights"), exist_ok=True)
-    os.makedirs(os.path.join(model_dir, "results"), exist_ok=True)
-    np.savez_compressed(f"{model_dir}/results/outputs.npz", logits=test_results["logits"], ids=test_results["ids"])
-    torch.save(model.state_dict(), f"{model_dir}/weights/{MODEL_NAME}.pth")
-    logger.info("Pesos finais salvos em models/%s/weights/%s.pth", MODEL_NAME, MODEL_NAME)
-    logger.info("Gerando gráficos (matriz de confusão e ROC-AUC)")
-    plot_confusion_matrix(test_results, model_dir, f"{MODEL_NAME} Confusion Matrix")
-    plot_roc_auc(test_results, model_dir, f"{MODEL_NAME} ROC-AUC Curve")
-    extra_info = {"Camadas descongeladas": 6, "Nº épocas": num_epochs}
-    save_metrics_csv(test_results, model_dir, extra_info=extra_info)
-    logger.info("run_vit concluído (métricas exportadas e plots salvos).")
+        threshold, threshold_score = best_threshold(
+            val_base["y_true"], val_base["probs"], metric=threshold_metric
+        )
+        val_metrics = binary_metrics(
+            val_base["y_true"],
+            val_base["probs"],
+            threshold=threshold,
+            loss=val_base["loss"],
+            logits=val_base["logits"],
+            ids=val_base["ids"],
+        )
+        scheduler.step(val_metrics["auc"])
+
+        train_loss /= max(len(train_loader), 1)
+        train_acc = train_correct / max(train_total, 1)
+        logger.info(
+            "Epoch %d/%d | train_loss=%.4f train_acc=%.4f | val_loss=%.4f val_acc=%.4f val_auc=%.4f threshold=%.4f score=%.4f",
+            epoch,
+            epochs,
+            train_loss,
+            train_acc,
+            val_metrics["loss"],
+            val_metrics["acc"],
+            val_metrics["auc"],
+            threshold,
+            threshold_score,
+        )
+
+        current_score = checkpoint_score(val_metrics)
+        if current_score > best_score:
+            best_score = current_score
+            best_val_auc = val_metrics["auc"]
+            best_threshold_value = threshold
+            epochs_without_improvement = 0
+            torch.save(model.state_dict(), best_path)
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= early_stop_patience:
+                logger.info("Early stopping at epoch %d", epoch)
+                break
+
+    model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
+    test_results = evaluate_classifier(
+        model,
+        test_loader,
+        criterion,
+        device,
+        threshold=best_threshold_value,
+        forward_fn=_vit_logits,
+    )
+
+    (model_dir / "weights").mkdir(parents=True, exist_ok=True)
+    (model_dir / "results").mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        model_dir / "results" / "outputs.npz",
+        logits=test_results["logits"],
+        ids=test_results["ids"],
+        probs=test_results["probs"],
+        y_true=test_results["y_true"],
+        y_pred=test_results["y_pred"],
+    )
+    torch.save(model.state_dict(), model_dir / "weights" / f"{model_name}.pth")
+
+    plot_confusion_matrix(test_results, str(model_dir), f"{model_name} Confusion Matrix")
+    plot_roc_auc(test_results, str(model_dir), f"{model_name} ROC-AUC Curve")
+    save_metrics_csv(
+        test_results,
+        str(model_dir),
+        extra_info={
+            "model": model_name,
+            "pretrained_model": pretrained_model,
+            "image_size": 224,
+            "epochs_requested": epochs,
+            "epochs_run": epochs_run,
+            "best_val_auc": best_val_auc,
+            "threshold": best_threshold_value,
+            "threshold_metric": threshold_metric,
+            "last_n_layers": last_n_layers,
+            "use_weighted_sampler": use_weighted_sampler,
+            "use_class_weights": use_class_weights,
+            "label_smoothing": label_smoothing,
+            "learning_rate_classifier": learning_rate_classifier,
+            "learning_rate_backbone": learning_rate_backbone,
+            "augment": augment,
+        },
+    )
+
+    logger.info(
+        "ViT test: acc=%.4f precision=%.4f recall=%.4f f1=%.4f auc=%.4f specificity=%.4f",
+        test_results["acc"],
+        test_results["precision"],
+        test_results["recall"],
+        test_results["f1"],
+        test_results["auc"],
+        test_results["specificity"],
+    )
+    return test_results
