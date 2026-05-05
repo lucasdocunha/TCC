@@ -1,127 +1,225 @@
-from src.data import ImageDataset
-from src.plots import *
+from __future__ import annotations
 import logging
+from contextlib import nullcontext
+from pathlib import Path
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, WeightedRandomSampler
-from transformers import ViTForImageClassification, ViTImageProcessor
-from torchvision import transforms
-import pandas as pd
-import numpy as np
 import tqdm
-from pathlib import Path
-import os
-from sklearn.metrics import accuracy_score, precision_score, f1_score, roc_auc_score, recall_score
 from scipy.special import softmax
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
+from torch.utils.data import DataLoader, WeightedRandomSampler
+from torchvision import transforms
+from transformers import ViTForImageClassification, ViTImageProcessor
+from src.data import FourierMode, ImageDataset
+from src.data.paths import phase1_split_root
+from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
 logger = logging.getLogger(__name__)
 
+PRETRAINED = "google/vit-base-patch16-224"
+IMAGE_SIZE = 224
+
 
 class ViTTransform:
-    def __init__(self, pretrained: str, augment: bool = False):
-        self.processor = ViTImageProcessor.from_pretrained(pretrained)
+    """Transform aplicado às imagens antes de entrar no ViT.
+
+    Para ``fourier='none'`` delega ao ``ViTImageProcessor`` do HuggingFace.
+    Para demais modos usa uma pipeline manual de torchvision, pois o processor
+    não aceita tensores com número de canais diferente de 3.
+    """
+
+    _RGB_MODES: frozenset[FourierMode] = frozenset({"none"})
+
+    def __init__(self, fourier: FourierMode, augment: bool = False) -> None:
+        """Inicializa o transform conforme o modo Fourier e flag de augmentation.
+
+        Args:
+            fourier: Modo de entrada da imagem (espacial ou frequência).
+            augment: Se ``True``, aplica augmentações geométricas e de cor.
+        """
+        self.fourier = fourier
         self.augment = augment
-        self.aug = transforms.Compose([
+        if fourier in self._RGB_MODES:
+            self.processor = ViTImageProcessor.from_pretrained(PRETRAINED)
+            self._use_processor = True
+        else:
+            self.processor = None
+            self._use_processor = False
+            self._pil_aug = transforms.Compose([
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomVerticalFlip(),
+                transforms.RandomRotation(20),
+            ]) if augment else None
+        self._aug_pil = transforms.Compose([
             transforms.RandomHorizontalFlip(),
             transforms.RandomVerticalFlip(),
             transforms.RandomRotation(20),
             transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
             transforms.RandomGrayscale(p=0.1),
             transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
-        ])
+        ]) if augment else None
 
-    def __call__(self, img):
-        if self.augment:
-            img = self.aug(img)
-        return self.processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
+    def __call__(self, img) -> torch.Tensor:
+        """Transforma uma imagem PIL no tensor esperado pelo ViT.
+
+        Args:
+            img: Imagem PIL RGB.
+
+        Returns:
+            Tensor ``(C, H, W)`` pronto para o modelo.
+        """
+        if self._use_processor:
+            if self._aug_pil is not None:
+                img = self._aug_pil(img)
+            return self.processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
+        if self._pil_aug is not None:
+            img = self._pil_aug(img)
+        return transforms.Compose([
+            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])(img)
 
 
-def collate_fn(batch):
+def _expand_to_3ch(x: torch.Tensor) -> torch.Tensor:
+    """Expande tensores com canais != 3 para 3 canais por repetição.
+
+    Args:
+        x: Tensor ``(B, C, H, W)``.
+
+    Returns:
+        Tensor ``(B, 3, H, W)``.
+    """
+    if x.shape[1] == 3:
+        return x
+    if x.shape[1] == 1:
+        return x.repeat(1, 3, 1, 1)
+    if x.shape[1] == 2:
+        return torch.cat([x, x[:, :1, :, :]], dim=1)
+    return x[:, :3, :, :]
+
+
+def _collate_fn(batch) -> tuple:
+    """Agrega uma lista de amostras em tensores batched.
+
+    Args:
+        batch: Lista de tuplas ``(imagem, label, idx)``.
+
+    Returns:
+        Tupla ``(imgs, labels, idxs)`` como tensores.
+    """
     imgs, labels, idxs = zip(*batch)
-    imgs = torch.stack([torch.tensor(i) if not isinstance(i, torch.Tensor) else i for i in imgs])
+    imgs = torch.stack([i if isinstance(i, torch.Tensor) else torch.tensor(i) for i in imgs])
     labels = torch.tensor(labels, dtype=torch.long)
     idxs = torch.tensor(idxs, dtype=torch.long)
     return imgs, labels, idxs
 
 
-def mixup_batch(x, y, alpha=0.3):
-    lam = np.random.beta(alpha, alpha)
-    idx = torch.randperm(x.size(0)).to(x.device)
-    x_mix = lam * x + (1 - lam) * x[idx]
-    y_a, y_b = y, y[idx]
-    return x_mix, y_a, y_b, lam
+def _device() -> torch.device:
+    """Retorna ``cuda:0`` se disponível, senão ``cpu``."""
+    return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-def mixup_criterion(criterion, out, y_a, y_b, lam):
-    return lam * criterion(out, y_a) + (1 - lam) * criterion(out, y_b)
+def _amp_ctx(device: torch.device):
+    """Retorna contexto de autocast para CUDA ou nullcontext para CPU."""
+    return torch.amp.autocast("cuda") if device.type == "cuda" else nullcontext()
 
 
-def run_vit():
-    if not logging.root.handlers:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+def _class_weights(csv_path: Path) -> tuple:
+    """Calcula contagens por classe e cria um ``WeightedRandomSampler``.
 
-    logger.info("Iniciando run_vit (pipeline ViT).")
-    PWD = Path.cwd()
-    BATCH = 32
-    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    MODEL_NAME = "vit"
-    PRETRAINED = "google/vit-base-patch16-224"
-    EARLY_STOP_PATIENCE = 15
-    logger.info("Dispositivo: %s | batch_size=%d | cwd=%s", DEVICE, BATCH, PWD)
-    NUM_WORKERS = 4
-    PIN_MEMORY = True
-    PERSISTENT_WORKERS = True
-    logger.info("DataLoader: num_workers=%d, pin_memory=%s, persistent_workers=%s", NUM_WORKERS, PIN_MEMORY, PERSISTENT_WORKERS)
-    vit_transform_train = ViTTransform(PRETRAINED, augment=True)
-    vit_transform_eval  = ViTTransform(PRETRAINED, augment=False)
-    logger.info("Carregando ImageDataset (train, val, test)")
-    train = ImageDataset(
-        file_csv=f"{PWD}/data/raw/train.csv",
-        images_dir=f"/media/ssd2/lucas.ocunha/datasets/phase1/trainset",
-        transform=vit_transform_train,
-    )
-    val = ImageDataset(
-        file_csv=f"{PWD}/data/raw/val.csv",
-        images_dir=f"/media/ssd2/lucas.ocunha/datasets/phase1/valset",
-        transform=vit_transform_eval,
-    )
-    test = ImageDataset(
-        file_csv=f"{PWD}/data/raw/test.csv",
-        images_dir=f"/media/ssd2/lucas.ocunha/datasets/phase1/testset",
-        transform=vit_transform_eval,
-    )
-    logger.info("Datasets prontos: amostras train=%d, val=%d, test=%d", len(train), len(val), len(test))
-    train_df = pd.read_csv(f"{PWD}/data/raw/train.csv")
-    class_counts = train_df["target"].value_counts().sort_index()
-    sample_weights = train_df["target"].map({0: 1.0 / class_counts[0], 1: 1.0 / class_counts[1]}).values
+    Args:
+        csv_path: Caminho para o CSV com coluna ``target``.
+
+    Returns:
+        Tupla ``(class_counts, sampler)``.
+    """
+    df = pd.read_csv(csv_path)
+    df.columns = df.columns.str.strip()
+    counts = df["target"].value_counts().sort_index()
+    sample_w = df["target"].map({0: 1.0 / counts[0], 1: 1.0 / counts[1]}).values
     sampler = WeightedRandomSampler(
-        weights=torch.tensor(sample_weights, dtype=torch.float),
-        num_samples=len(train_df),
+        weights=torch.tensor(sample_w, dtype=torch.float),
+        num_samples=len(df),
         replacement=True,
     )
-    logger.info("WeightedRandomSampler criado: class_counts=%s", class_counts.to_dict())
-    train_loader = DataLoader(
-        train, batch_size=BATCH, num_workers=NUM_WORKERS,
-        persistent_workers=PERSISTENT_WORKERS, pin_memory=PIN_MEMORY,
-        sampler=sampler, collate_fn=collate_fn,
+    return counts, sampler
+
+
+def run_vit(
+    fourier: FourierMode = "none",
+    epochs: int = 50,
+    raw_min: bool = False,
+    batch_size: int = 32,
+    num_workers: int = 4,
+    early_stop_patience: int = 15,
+    output_root: str | Path | None = None,
+    seed: int = 42,
+) -> dict:
+    """Treina e avalia o ViT-Base para um modo de entrada Fourier.
+
+    Para modos com canais != 3, o tensor é expandido para 3 canais antes
+    de entrar no modelo, preservando os pesos pré-treinados do patch embedding.
+    Resultados, pesos e plots são salvos em ``models/vit/<fourier>/``.
+
+    Args:
+        fourier: Modo de entrada (``'none'``, ``'magnitude'``, ``'phase'``, etc.).
+        epochs: Número máximo de épocas de treino.
+        raw_min: Se ``True``, usa CSVs de ``data/raw_min/``; caso contrário ``data/raw/``.
+        batch_size: Tamanho do batch.
+        num_workers: Workers do DataLoader.
+        early_stop_patience: Épocas sem melhora no val AUC antes de parar.
+        output_root: Diretório raiz para salvar artefatos. Padrão: ``Path.cwd()``.
+        seed: Semente para reprodutibilidade.
+
+    Returns:
+        Dicionário com métricas e arrays do conjunto de teste.
+    """
+    if not logging.root.handlers:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    pwd = Path.cwd()
+    output_root = Path(output_root) if output_root is not None else pwd
+    device = _device()
+    pin_memory = device.type == "cuda"
+    persistent_workers = num_workers > 0
+    model_name = "vit"
+    model_dir = output_root / "models" / model_name / fourier
+    (model_dir / "weights").mkdir(parents=True, exist_ok=True)
+    (model_dir / "results").mkdir(parents=True, exist_ok=True)
+    best_path = model_dir / "weights" / f"best_{model_name}.pth"
+    data_dir = pwd / "data" / ("raw_min" if raw_min else "raw")
+    spatial_size = (IMAGE_SIZE, IMAGE_SIZE) if fourier != "none" else None
+    logger.info("run_vit | fourier=%s device=%s batch=%d", fourier, device, batch_size)
+    tf_train = ViTTransform(fourier, augment=True)
+    tf_eval = ViTTransform(fourier, augment=False)
+    train_ds = ImageDataset(
+        file_csv=data_dir / "train.csv", images_dir=phase1_split_root("train"),
+        transform=tf_train, fourier=fourier, spatial_size=spatial_size,
     )
-    val_loader = DataLoader(
-        val, batch_size=BATCH, num_workers=NUM_WORKERS,
-        persistent_workers=PERSISTENT_WORKERS, pin_memory=PIN_MEMORY,
-        shuffle=False, collate_fn=collate_fn,
+    val_ds = ImageDataset(
+        file_csv=data_dir / "val.csv", images_dir=phase1_split_root("val"),
+        transform=tf_eval, fourier=fourier, spatial_size=spatial_size,
     )
-    test_loader = DataLoader(
-        test, batch_size=BATCH, num_workers=NUM_WORKERS,
-        persistent_workers=PERSISTENT_WORKERS, pin_memory=PIN_MEMORY,
-        shuffle=False, collate_fn=collate_fn,
+    test_ds = ImageDataset(
+        file_csv=data_dir / "test.csv", images_dir=phase1_split_root("test"),
+        transform=tf_eval, fourier=fourier, spatial_size=spatial_size,
     )
-    logger.info("DataLoaders criados: batches train=%d, val=%d, test=%d", len(train_loader), len(val_loader), len(test_loader))
-    logger.info("Instanciando ViT pré-treinado e configurando transfer learning")
-    model = ViTForImageClassification.from_pretrained(
-        PRETRAINED,
-        num_labels=2,
-        ignore_mismatched_sizes=True,
+    sample_x, _, _ = train_ds[0]
+    in_channels = sample_x.shape[0]
+    logger.info("Datasets: train=%d val=%d test=%d | in_channels=%d", len(train_ds), len(val_ds), len(test_ds), in_channels)
+    class_counts, sampler = _class_weights(data_dir / "train.csv")
+    loader_kw = dict(
+        batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory,
+        persistent_workers=persistent_workers, collate_fn=_collate_fn,
     )
+    train_loader = DataLoader(train_ds, sampler=sampler, **loader_kw)
+    val_loader = DataLoader(val_ds, shuffle=False, **loader_kw)
+    test_loader = DataLoader(test_ds, shuffle=False, **loader_kw)
+    model = ViTForImageClassification.from_pretrained(PRETRAINED, num_labels=2, ignore_mismatched_sizes=True)
     for param in model.parameters():
         param.requires_grad = False
     for i in [-1, -2, -3]:
@@ -129,41 +227,32 @@ def run_vit():
             param.requires_grad = True
     for param in model.vit.layernorm.parameters():
         param.requires_grad = True
-    model.classifier = nn.Sequential(nn.Dropout(p=0.1), nn.Linear(model.config.hidden_size, 2)).to(DEVICE)
-    logger.info("Últimos 6 encoder blocks, layernorm e classifier (com dropout) liberados.")
-    model = model.to(DEVICE)
-    logger.info("Modelo enviado para %s.", DEVICE)
-    w0 = np.sqrt(1000 / class_counts[0])
-    w1 = np.sqrt(1000 / class_counts[1])
-    weights = torch.tensor([w0, w1], dtype=torch.float).to(DEVICE)
-    criterion = nn.CrossEntropyLoss(weight=weights)
-    logger.info("CrossEntropyLoss com pesos suavizados: classe0=%.4f classe1=%.4f", w0, w1)
-    optimizer = torch.optim.AdamW([
+    model.classifier = nn.Sequential(nn.Dropout(p=0.1), nn.Linear(model.config.hidden_size, 2))
+    model = model.to(device)
+    w0 = float(np.sqrt(1000 / class_counts[0]))
+    w1 = float(np.sqrt(1000 / class_counts[1]))
+    criterion = nn.CrossEntropyLoss(weight=torch.tensor([w0, w1], dtype=torch.float).to(device))
+    logger.info("CrossEntropyLoss pesos: classe0=%.4f classe1=%.4f", w0, w1)
+    param_groups = [
         {"params": model.classifier.parameters(), "lr": 1e-4, "weight_decay": 1e-2},
         {"params": model.vit.layernorm.parameters(), "lr": 1e-5, "weight_decay": 1e-2},
         {"params": model.vit.encoder.layer[-1].parameters(), "lr": 1e-5, "weight_decay": 1e-2},
         {"params": model.vit.encoder.layer[-2].parameters(), "lr": 5e-6, "weight_decay": 1e-2},
         {"params": model.vit.encoder.layer[-3].parameters(), "lr": 5e-6, "weight_decay": 1e-2},
-    ])
-    scaler = torch.amp.GradScaler("cuda")
+    ]
+    optimizer = torch.optim.AdamW(param_groups)
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=6)
-    logger.info("AdamW, CrossEntropyLoss ponderada, AMP GradScaler e ReduceLROnPlateau configurados.")
-    num_epochs = 50
     best_val_auc = 0.0
     epochs_no_improve = 0
-    best_path = f"models/{MODEL_NAME}/weights/best_{MODEL_NAME}.pth"
-    os.makedirs(os.path.dirname(best_path), exist_ok=True)
-    logger.info("Iniciando treinamento: %d épocas. Melhor modelo salvo em %s", num_epochs, best_path)
-    epoch_bar = tqdm.tqdm(range(num_epochs), desc="Epochs")
-    for epoch in epoch_bar:
+    for epoch in tqdm.tqdm(range(epochs), desc="Epochs"):
         model.train()
-        train_loss, train_correct, train_total = 0, 0, 0
-        train_pbar = tqdm.tqdm(train_loader, desc=f"Train ep {epoch+1}/{num_epochs}", leave=False)
-        for img, label, _ in train_pbar:
-            x = img.to(DEVICE)
-            y = label.to(DEVICE)
+        train_loss, train_correct, train_total = 0.0, 0, 0
+        for img, label, _ in tqdm.tqdm(train_loader, desc=f"Train {epoch+1}/{epochs}", leave=False):
+            x, y = img.to(device), label.to(device)
+            x = _expand_to_3ch(x)
             optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda"):
+            with _amp_ctx(device):
                 out = model(pixel_values=x).logits
                 loss = criterion(out, y)
             scaler.scale(loss).backward()
@@ -172,98 +261,96 @@ def run_vit():
             train_loss += loss.item()
             train_correct += (out.argmax(1) == y).sum().item()
             train_total += y.size(0)
-            train_pbar.set_postfix(loss=f"{loss.item():.4f}")
         train_loss /= len(train_loader)
         train_acc = train_correct / train_total
         model.eval()
-        val_loss, val_correct, val_total = 0, 0, 0
+        val_loss, val_correct, val_total = 0.0, 0, 0
         val_probs, val_true = [], []
         with torch.no_grad():
-            val_pbar = tqdm.tqdm(val_loader, desc=f"Val ep {epoch+1}/{num_epochs}", leave=False)
-            for x, y, _ in val_pbar:
-                x = x.to(DEVICE)
-                y = y.to(DEVICE)
-                with torch.amp.autocast("cuda"):
+            for x, y, _ in tqdm.tqdm(val_loader, desc=f"Val {epoch+1}/{epochs}", leave=False):
+                x, y = x.to(device), y.to(device)
+                x = _expand_to_3ch(x)
+                with _amp_ctx(device):
                     out = model(pixel_values=x).logits
                     loss = criterion(out, y)
                 val_loss += loss.item()
                 val_correct += (out.argmax(1) == y).sum().item()
                 val_total += y.size(0)
-                probs = torch.softmax(out, dim=1)[:, 1]
-                val_probs.extend(probs.cpu().numpy())
+                val_probs.extend(torch.softmax(out, dim=1)[:, 1].cpu().numpy())
                 val_true.extend(y.cpu().numpy())
-                val_pbar.set_postfix(loss=f"{loss.item():.4f}")
         val_loss /= len(val_loader)
         val_acc = val_correct / val_total
         val_auc = roc_auc_score(val_true, val_probs)
+        scheduler.step(1 - val_auc)
+        logger.info(
+            "Época %d/%d | train_loss=%.4f train_acc=%.4f | val_loss=%.4f val_acc=%.4f val_auc=%.4f",
+            epoch + 1, epochs, train_loss, train_acc, val_loss, val_acc, val_auc,
+        )
         if val_auc > best_val_auc:
             best_val_auc = val_auc
             epochs_no_improve = 0
             torch.save(model.state_dict(), best_path)
-            logger.info("Época %d/%d: novo melhor val_auc=%.6f — checkpoint salvo em %s", epoch + 1, num_epochs, val_auc, best_path,)
+            logger.info("Novo melhor val_auc=%.6f -> checkpoint salvo.", val_auc)
         else:
             epochs_no_improve += 1
-            if epochs_no_improve >= EARLY_STOP_PATIENCE:
-                logger.info("Early stopping ativado na época %d.", epoch + 1)
+            if epochs_no_improve >= early_stop_patience:
+                logger.info("Early stopping na época %d.", epoch + 1)
                 break
-        scheduler.step(1 - val_auc)
-        epoch_bar.set_postfix(
-            train_loss=f"{train_loss:.4f}", train_acc=f"{train_acc:.4f}",
-            val_loss=f"{val_loss:.4f}", val_acc=f"{val_acc:.4f}",
-            val_auc=f"{val_auc:.4f}",
-        )
-        logger.info("Época %d/%d concluída | train_loss=%.6f train_acc=%.6f | val_loss=%.6f val_acc=%.6f | val_auc=%.6f",
-                    epoch + 1, num_epochs, train_loss, train_acc, val_loss, val_acc, val_auc)
-    logger.info("Treino finalizado. Carregando melhores pesos de %s para avaliação no teste.", best_path)
-    model.load_state_dict(torch.load(best_path))
+    logger.info("Carregando melhor checkpoint de %s.", best_path)
+    model.load_state_dict(torch.load(best_path, map_location=device))
     model.eval()
-    y_true, y_pred = [], []
-    all_logits, all_ids = [], []
+    y_true, y_pred, all_logits, all_ids = [], [], [], []
     with torch.no_grad():
-        for x, y, idx in tqdm.tqdm(test_loader, desc="Teste (inferência)"):
-            x = x.to(DEVICE)
-            y = y.to(DEVICE)
-            with torch.amp.autocast("cuda"):
+        for x, y, idx in tqdm.tqdm(test_loader, desc="Teste"):
+            x, y = x.to(device), y.to(device)
+            x = _expand_to_3ch(x)
+            with _amp_ctx(device):
                 out = model(pixel_values=x).logits
-            preds = out.argmax(1)
             y_true.extend(y.cpu().numpy())
-            y_pred.extend(preds.cpu().numpy())
+            y_pred.extend(out.argmax(1).cpu().numpy())
             all_logits.append(out.detach().cpu().numpy().astype(np.float32))
             all_ids.extend(idx.cpu().numpy())
     logits = np.concatenate(all_logits)
-    probs  = softmax(logits, axis=1)[:, 1]
+    probs = softmax(logits, axis=1)[:, 1]
     y_true = np.array(y_true)
     y_pred = np.array(y_pred)
     tn = int(((y_true == 0) & (y_pred == 0)).sum())
     fp = int(((y_true == 0) & (y_pred == 1)).sum())
     fn = int(((y_true == 1) & (y_pred == 0)).sum())
     tp = int(((y_true == 1) & (y_pred == 1)).sum())
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
     test_results = {
         "acc": accuracy_score(y_true, y_pred),
-        "precision": precision_score(y_true, y_pred),
-        "recall": recall_score(y_true, y_pred),
-        "f1": f1_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred, zero_division=0),
+        "recall": recall_score(y_true, y_pred, zero_division=0),
+        "f1": f1_score(y_true, y_pred, zero_division=0),
         "auc": roc_auc_score(y_true, probs),
-        "specificity": specificity,
+        "specificity": tn / (tn + fp) if (tn + fp) > 0 else 0.0,
         "tp": tp, "fp": fp, "fn": fn, "tn": tn,
-        "y_true": y_true,
-        "y_pred": y_pred,
-        "logits": logits,
-        "ids": np.array(all_ids)
+        "y_true": y_true, "y_pred": y_pred,
+        "logits": logits, "ids": np.array(all_ids),
     }
-    logger.info("Métricas no teste: acc=%.4f precision=%.4f recall=%.4f f1=%.4f auc=%.4f specificity=%.4f | tp=%d fp=%d fn=%d tn=%d",
-                test_results["acc"], test_results["precision"], test_results["recall"], test_results["f1"], test_results["auc"],
-                test_results["specificity"], tp, fp, fn, tn)
-    model_dir = f"{PWD}/models/{MODEL_NAME}"
-    os.makedirs(os.path.join(model_dir, "weights"), exist_ok=True)
-    os.makedirs(os.path.join(model_dir, "results"), exist_ok=True)
-    np.savez_compressed(f"{model_dir}/results/outputs.npz", logits=test_results["logits"], ids=test_results["ids"])
-    torch.save(model.state_dict(), f"{model_dir}/weights/{MODEL_NAME}.pth")
-    logger.info("Pesos finais salvos em models/%s/weights/%s.pth", MODEL_NAME, MODEL_NAME)
-    logger.info("Gerando gráficos (matriz de confusão e ROC-AUC)")
-    plot_confusion_matrix(test_results, model_dir, f"{MODEL_NAME} Confusion Matrix")
-    plot_roc_auc(test_results, model_dir, f"{MODEL_NAME} ROC-AUC Curve")
-    extra_info = {"Camadas descongeladas": 6, "Nº épocas": num_epochs}
-    save_metrics_csv(test_results, model_dir, extra_info=extra_info)
-    logger.info("run_vit concluído (métricas exportadas e plots salvos).")
+    logger.info(
+        "Métricas no teste: acc=%.4f precision=%.4f recall=%.4f f1=%.4f auc=%.4f specificity=%.4f | tp=%d fp=%d fn=%d tn=%d",
+        test_results["acc"], test_results["precision"], test_results["recall"], test_results["f1"],
+        test_results["auc"], test_results["specificity"], tp, fp, fn, tn,
+    )
+    np.savez_compressed(
+        model_dir / "results" / "outputs.npz",
+        logits=logits, ids=test_results["ids"], probs=probs, y_true=y_true, y_pred=y_pred,
+    )
+    torch.save(model.state_dict(), model_dir / "weights" / f"{model_name}.pth")
+    plot_confusion_matrix(test_results, str(model_dir), f"ViT [{fourier}] Confusion Matrix")
+    plot_roc_auc(test_results, str(model_dir), f"ViT [{fourier}] ROC-AUC Curve")
+    save_metrics_csv(
+        test_results, str(model_dir),
+        extra_info={
+            "fourier": fourier,
+            "in_channels": in_channels,
+            "image_size": IMAGE_SIZE,
+            "epochs": epochs,
+            "best_val_auc": best_val_auc,
+            "pretrained": PRETRAINED,
+        },
+    )
+    logger.info("run_vit [%s] concluído.", fourier)
+    return test_results
