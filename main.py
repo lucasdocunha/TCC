@@ -15,6 +15,7 @@ from src.pipelines.mobilenet import run_mobilenet
 from src.pipelines.resnet import run_resnet
 from src.pipelines.vit import run_vit
 from src.pipelines.xcpetion import run_xception
+from src.pipelines.clip import run_clip
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ def main() -> None:
             data_limit=float("inf"),
             batch_size=BATCH_SIZE,
             num_workers=NUM_WORKERS,
+            pretrained=False,
         )
 
     for mode in ALL_FOURIER_MODES:
@@ -51,6 +53,7 @@ def main() -> None:
             image_size=224,
             batch_size=BATCH_SIZE,
             num_workers=NUM_WORKERS,
+            pretrained=False,
             use_weighted_sampler=True,
             use_class_weights=False,
             train_layer3=True,
@@ -69,6 +72,7 @@ def main() -> None:
             image_size=224,
             batch_size=BATCH_SIZE,
             num_workers=NUM_WORKERS,
+            pretrained=False,
             use_weighted_sampler=True,
             use_class_weights=False,
             last_n_blocks=4,
@@ -81,7 +85,22 @@ def main() -> None:
         logger.info(
             "======== ViT | somente RGB (pipeline sem modos Fourier) ========"
         )
-        run_vit()
+        run_vit(
+            epochs=EPOCHS,
+            raw_min=RAW_MIN,
+            batch_size=BATCH_SIZE,
+            num_workers=NUM_WORKERS,
+        )
+
+        logger.info(
+            "======== CLIP local | somente RGB (sem pesos externos) ========"
+        )
+        run_clip(
+            epochs=EPOCHS,
+            raw_min=RAW_MIN,
+            batch_size=BATCH_SIZE,
+            num_workers=NUM_WORKERS,
+        )
 
 
 if __name__ == "__main__":

@@ -30,3 +30,24 @@ def tiny_phase1_dataset(tmp_path, monkeypatch):
 
     monkeypatch.setenv("TCC_DATASET_ROOT", str(dataset_root))
     return dataset_root
+
+
+@pytest.fixture
+def tiny_short_split_dataset(tmp_path, monkeypatch):
+    repo_root = Path(__file__).resolve().parents[1]
+    dataset_root = tmp_path / "min_dataset_style"
+
+    for split in ("train", "val", "test"):
+        out_dir = dataset_root / split
+        out_dir.mkdir(parents=True, exist_ok=True)
+        df = pd.read_csv(repo_root / "data" / "raw_min" / f"{split}.csv").head(16)
+        for idx, row in df.reset_index(drop=True).iterrows():
+            base = 64 + (idx * 13) % 128
+            arr = np.full((96, 96, 3), base, dtype=np.uint8)
+            arr[:, :, 0] = (arr[:, :, 0] + idx * 9) % 255
+            arr[::3, :, 1] = 255 - arr[::3, :, 1]
+            arr[:, ::4, 2] = (arr[:, ::4, 2] + 40) % 255
+            Image.fromarray(arr, mode="RGB").save(out_dir / row["img_name"])
+
+    monkeypatch.setenv("TCC_DATASET_ROOT", str(dataset_root))
+    return dataset_root

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import torch
 
 
@@ -14,6 +15,13 @@ def test_xception_accepts_rgb_frequency_and_concat_channels():
             out = model(torch.randn(2, in_channels, 128, 128))
 
         assert out.shape == (2, 2)
+
+
+def test_xception_rejects_external_pretrained_weights():
+    from src.models.xception import xception
+
+    with pytest.raises(ValueError, match="pretrained"):
+        xception(pretrained=True, num_classes=2)
 
 
 def test_xception_pipeline_tiny_run_writes_metrics(tmp_path, tiny_phase1_dataset):

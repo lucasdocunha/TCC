@@ -11,46 +11,20 @@ import tqdm
 
 from src.data import ImageDataset
 from src.data.paths import phase1_split_root
+from src.models.vit import VisionTransformerClassifier
 from src.pipelines.evaluation import (
     ThresholdMetric,
     amp_context,
     best_threshold,
     binary_metrics,
-    checkpoint_score,
     evaluate_classifier,
+    sanitize_inputs,
     sanitize_logits,
 )
+from src.pipelines.training import mixup_batch, mixup_loss
 from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
 logger = logging.getLogger(__name__)
-
-
-class ViTTransform:
-    def __init__(self, pretrained: str, augment: bool = False):
-        from transformers import ViTImageProcessor
-
-        self.processor = ViTImageProcessor.from_pretrained(pretrained)
-        self.augment = augment
-        self.aug = transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(),
-                transforms.RandomRotation(12),
-                transforms.ColorJitter(
-                    brightness=0.18,
-                    contrast=0.18,
-                    saturation=0.12,
-                    hue=0.02,
-                ),
-                transforms.RandomAffine(degrees=0, translate=(0.06, 0.06)),
-            ]
-        )
-
-    def __call__(self, img):
-        if self.augment:
-            img = self.aug(img)
-        return self.processor(images=img, return_tensors="pt")[
-            "pixel_values"
-        ].squeeze(0)
 
 
 def collate_fn(batch):
@@ -67,6 +41,46 @@ def _device() -> torch.device:
 
 def _split_root(_pwd: Path, _raw_min: bool, split: str) -> Path:
     return phase1_split_root(split)
+
+
+def _transforms(image_size: int, augment: bool = True):
+    mean = [0.5, 0.5, 0.5]
+    std = [0.5, 0.5, 0.5]
+    if augment:
+        train_transform = transforms.Compose(
+            [
+                transforms.RandomResizedCrop(
+                    image_size, scale=(0.82, 1.0), ratio=(0.9, 1.1)
+                ),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomApply(
+                    [
+                        transforms.ColorJitter(
+                            brightness=0.12, contrast=0.12, saturation=0.08, hue=0.015
+                        )
+                    ],
+                    p=0.5,
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ]
+        )
+    else:
+        train_transform = transforms.Compose(
+            [
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ]
+        )
+    eval_transform = transforms.Compose(
+        [
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ]
+    )
+    return train_transform, eval_transform
 
 
 def _class_balance(
@@ -94,67 +108,27 @@ def _class_balance(
 
 
 def _vit_logits(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
-    return model(pixel_values=x).logits
-
-
-def _unfreeze_vit(model: nn.Module, last_n_layers: int) -> None:
-    for param in model.parameters():
-        param.requires_grad = False
-
-    last_n_layers = max(0, min(last_n_layers, len(model.vit.encoder.layer)))
-    for layer in model.vit.encoder.layer[-last_n_layers:]:
-        for param in layer.parameters():
-            param.requires_grad = True
-    for param in model.vit.layernorm.parameters():
-        param.requires_grad = True
-    for param in model.classifier.parameters():
-        param.requires_grad = True
-
-
-def _optimizer(
-    model: nn.Module,
-    learning_rate_classifier: float,
-    learning_rate_backbone: float,
-    weight_decay: float,
-    last_n_layers: int,
-):
-    param_groups = [
-        {
-            "params": model.classifier.parameters(),
-            "lr": learning_rate_classifier,
-            "weight_decay": weight_decay,
-        },
-        {
-            "params": model.vit.layernorm.parameters(),
-            "lr": learning_rate_backbone,
-            "weight_decay": weight_decay,
-        },
-    ]
-    layers = model.vit.encoder.layer[-last_n_layers:] if last_n_layers > 0 else []
-    for offset, layer in enumerate(reversed(layers), start=1):
-        param_groups.append(
-            {
-                "params": layer.parameters(),
-                "lr": learning_rate_backbone / float(offset),
-                "weight_decay": weight_decay,
-            }
-        )
-    return torch.optim.AdamW(param_groups)
+    return model(x)
 
 
 def run_vit(
-    epochs: int = 50,
-    raw_min: bool = False,
+    epochs: int = 30,
+    raw_min: bool = True,
     data_limit: int | float | None = None,
     output_root: str | Path | None = None,
     batch_size: int = 32,
     num_workers: int = 4,
-    pretrained_model: str = "google/vit-base-patch16-224",
-    learning_rate_classifier: float = 1e-4,
-    learning_rate_backbone: float = 1e-5,
-    weight_decay: float = 1e-2,
-    early_stop_patience: int = 12,
-    last_n_layers: int = 3,
+    image_size: int = 224,
+    patch_size: int = 16,
+    hidden_size: int = 256,
+    num_hidden_layers: int = 6,
+    num_attention_heads: int = 8,
+    dropout: float = 0.2,
+    learning_rate_classifier: float = 5e-4,
+    learning_rate_backbone: float = 1e-4,
+    weight_decay: float = 1e-4,
+    early_stop_patience: int = 8,
+    train_backbone: bool = True,
     use_weighted_sampler: bool = True,
     use_class_weights: bool = True,
     label_smoothing: float = 0.0,
@@ -162,6 +136,7 @@ def run_vit(
     augment: bool = True,
     seed: int = 42,
     max_grad_norm: float | None = 1.0,
+    mixup_alpha: float = 0.0,
 ):
     if not logging.root.handlers:
         logging.basicConfig(
@@ -179,13 +154,11 @@ def run_vit(
     device = _device()
     pin_memory = device.type == "cuda"
     persistent_workers = num_workers > 0
-    model_name = "vit"
+    model_name = "vit_scratch"
     run_dir = "none" if data_limit == np.inf else f"none_limit{data_limit}"
-    model_dir = output_root / "models" / model_name / run_dir
+    model_dir = output_root / "models" / "vit" / model_name / run_dir
 
-    train_transform = ViTTransform(pretrained_model, augment=augment)
-    eval_transform = ViTTransform(pretrained_model, augment=False)
-
+    train_transform, eval_transform = _transforms(image_size, augment=augment)
     train = ImageDataset(
         file_csv=data_dir / "train.csv",
         images_dir=_split_root(pwd, raw_min, "train"),
@@ -228,39 +201,40 @@ def run_vit(
     val_loader = DataLoader(val, shuffle=False, **loader_kwargs)
     test_loader = DataLoader(test, shuffle=False, **loader_kwargs)
 
-    from transformers import ViTForImageClassification
-
-    model = ViTForImageClassification.from_pretrained(
-        pretrained_model,
-        num_labels=2,
-        ignore_mismatched_sizes=True,
+    model = VisionTransformerClassifier(
+        num_classes=2,
+        image_size=image_size,
+        patch_size=patch_size,
+        hidden_size=hidden_size,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
+        dropout=dropout,
     )
-    model.classifier = nn.Sequential(
-        nn.Dropout(p=0.1),
-        nn.Linear(model.config.hidden_size, 2),
-    )
-    _unfreeze_vit(model, last_n_layers=last_n_layers)
+    if not train_backbone:
+        model.freeze_backbone()
     model = model.to(device)
 
     criterion = nn.CrossEntropyLoss(
         weight=loss_weights.to(device) if use_class_weights else None,
         label_smoothing=label_smoothing,
     )
-    optimizer = _optimizer(
-        model,
-        learning_rate_classifier=learning_rate_classifier,
-        learning_rate_backbone=learning_rate_backbone,
-        weight_decay=weight_decay,
-        last_n_layers=last_n_layers,
-    )
+    param_groups = [
+        {"params": model.classifier.parameters(), "lr": learning_rate_classifier}
+    ]
+    classifier_params = {id(p) for p in model.classifier.parameters()}
+    backbone_params = [
+        p for p in model.parameters() if p.requires_grad and id(p) not in classifier_params
+    ]
+    if backbone_params:
+        param_groups.append({"params": backbone_params, "lr": learning_rate_backbone})
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=4
+        optimizer, mode="max", factor=0.5, patience=3
     )
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
 
     logger.info(
-        "Starting ViT: model=%s train=%d val=%d test=%d classes=%s device=%s",
-        pretrained_model,
+        "Starting ViT from scratch: train=%d val=%d test=%d classes=%s device=%s",
         len(train),
         len(val),
         len(test),
@@ -283,14 +257,15 @@ def run_vit(
         for x, y, _ in tqdm.tqdm(
             train_loader, desc=f"ViT train {epoch}/{epochs}", leave=False
         ):
-            x = x.to(device)
+            x = sanitize_inputs(x.to(device))
             y = y.to(device)
             optimizer.zero_grad(set_to_none=True)
 
             with amp_context(device):
-                out = model(pixel_values=x).logits
+                train_x, y_a, y_b, lam = mixup_batch(x, y, mixup_alpha)
+                out = model(train_x)
             out = sanitize_logits(out)
-            loss = criterion(out, y)
+            loss = mixup_loss(criterion, out, y_a, y_b, lam)
 
             scaler.scale(loss).backward()
             if max_grad_norm is not None:
@@ -318,7 +293,8 @@ def run_vit(
             logits=val_base["logits"],
             ids=val_base["ids"],
         )
-        scheduler.step(val_metrics["auc"])
+        selection_score = threshold_score
+        scheduler.step(selection_score)
 
         train_loss /= max(len(train_loader), 1)
         train_acc = train_correct / max(train_total, 1)
@@ -335,7 +311,7 @@ def run_vit(
             threshold_score,
         )
 
-        current_score = checkpoint_score(val_metrics)
+        current_score = selection_score
         if current_score > best_score:
             best_score = current_score
             best_val_auc = val_metrics["auc"]
@@ -367,6 +343,7 @@ def run_vit(
         probs=test_results["probs"],
         y_true=test_results["y_true"],
         y_pred=test_results["y_pred"],
+        threshold=best_threshold_value,
     )
     torch.save(model.state_dict(), model_dir / "weights" / f"{model_name}.pth")
 
@@ -377,17 +354,22 @@ def run_vit(
         str(model_dir),
         extra_info={
             "model": model_name,
-            "pretrained_model": pretrained_model,
-            "image_size": 224,
+            "architecture": "vit_scratch",
+            "image_size": image_size,
+            "patch_size": patch_size,
+            "hidden_size": hidden_size,
+            "num_hidden_layers": num_hidden_layers,
+            "num_attention_heads": num_attention_heads,
             "epochs_requested": epochs,
             "epochs_run": epochs_run,
             "best_val_auc": best_val_auc,
             "threshold": best_threshold_value,
             "threshold_metric": threshold_metric,
-            "last_n_layers": last_n_layers,
+            "train_backbone": train_backbone,
             "use_weighted_sampler": use_weighted_sampler,
             "use_class_weights": use_class_weights,
             "label_smoothing": label_smoothing,
+            "mixup_alpha": mixup_alpha,
             "learning_rate_classifier": learning_rate_classifier,
             "learning_rate_backbone": learning_rate_backbone,
             "augment": augment,

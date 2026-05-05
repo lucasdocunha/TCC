@@ -18,10 +18,10 @@ from src.pipelines.evaluation import (
     ThresholdMetric,
     best_threshold,
     binary_metrics,
-    checkpoint_score,
     evaluate_classifier,
     safe_auc,
 )
+from src.pipelines.training import mixup_batch, mixup_loss
 from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
 logger = logging.getLogger(__name__)
@@ -132,7 +132,7 @@ def run_mobilenet(
     output_root: str | Path | None = None,
     batch_size: int = 16,
     num_workers: int = 4,
-    pretrained: bool = True,
+    pretrained: bool = False,
     image_size: int = 224,
     learning_rate_classifier: float = 1e-3,
     learning_rate_backbone: float | None = None,
@@ -143,6 +143,8 @@ def run_mobilenet(
     use_weighted_sampler: bool = True,
     use_class_weights: bool = False,
     label_smoothing: float = 0.0,
+    dropout: float | None = None,
+    mixup_alpha: float = 0.0,
     threshold_metric: Literal[
         "accuracy", "youden", "f1", "balanced_accuracy"
     ] = "accuracy",
@@ -228,9 +230,11 @@ def run_mobilenet(
         in_channels=sample_x.shape[0],
         pretrained=pretrained,
         variant=variant,
+        dropout=dropout,
     )
-    freeze_classifier_only(model)
-    if warmup_epochs <= 0:
+    if pretrained:
+        freeze_classifier_only(model)
+    if pretrained and warmup_epochs <= 0:
         unfreeze_last_blocks(model, last_n_blocks=last_n_blocks)
     model = model.to(device)
 
@@ -243,9 +247,19 @@ def run_mobilenet(
         param_groups = [
             {"params": model.classifier.parameters(), "lr": learning_rate_classifier}
         ]
-        backbone_params = [
-            p for p in model.features[-last_n_blocks:].parameters() if p.requires_grad
-        ]
+        if pretrained:
+            backbone_params = [
+                p
+                for p in model.features[-last_n_blocks:].parameters()
+                if p.requires_grad
+            ]
+        else:
+            classifier_params = {id(p) for p in model.classifier.parameters()}
+            backbone_params = [
+                p
+                for p in model.parameters()
+                if p.requires_grad and id(p) not in classifier_params
+            ]
         if backbone_params:
             param_groups.append(
                 {"params": backbone_params, "lr": learning_rate_backbone}
@@ -279,7 +293,7 @@ def run_mobilenet(
     epochs_run = 0
 
     for epoch in range(1, epochs + 1):
-        if warmup_epochs > 0 and epoch == warmup_epochs + 1:
+        if pretrained and warmup_epochs > 0 and epoch == warmup_epochs + 1:
             unfreeze_last_blocks(model, last_n_blocks=last_n_blocks)
             optimizer = make_optimizer()
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -296,8 +310,9 @@ def run_mobilenet(
             optimizer.zero_grad(set_to_none=True)
 
             with _amp_context(device):
-                out = model(x)
-                loss = criterion(out, y)
+                train_x, y_a, y_b, lam = mixup_batch(x, y, mixup_alpha)
+                out = model(train_x)
+                loss = mixup_loss(criterion, out, y_a, y_b, lam)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -322,7 +337,8 @@ def run_mobilenet(
             logits=val_base["logits"],
             ids=val_base["ids"],
         )
-        scheduler.step(val_metrics["auc"])
+        selection_score = threshold_score
+        scheduler.step(selection_score)
 
         train_loss /= max(len(train_loader), 1)
         train_acc = train_correct / max(train_total, 1)
@@ -339,7 +355,7 @@ def run_mobilenet(
             threshold_score,
         )
 
-        current_score = checkpoint_score(val_metrics)
+        current_score = selection_score
         if current_score > best_score:
             best_score = current_score
             best_val_auc = val_metrics["auc"]
@@ -366,6 +382,7 @@ def run_mobilenet(
         probs=test_results["probs"],
         y_true=test_results["y_true"],
         y_pred=test_results["y_pred"],
+        threshold=best_threshold,
     )
     torch.save(model.state_dict(), model_dir / "weights" / f"{model_name}.pth")
 
@@ -393,6 +410,8 @@ def run_mobilenet(
             "use_weighted_sampler": use_weighted_sampler,
             "use_class_weights": use_class_weights,
             "label_smoothing": label_smoothing,
+            "dropout": dropout,
+            "mixup_alpha": mixup_alpha,
             "learning_rate_classifier": learning_rate_classifier,
             "learning_rate_backbone": learning_rate_backbone,
             "augment": effective_augment,
