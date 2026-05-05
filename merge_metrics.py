@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 MODELS_DIR = Path(__file__).resolve().parent / "models"
-OUTPUT_FILE = MODELS_DIR / "all_metrics.csv"
+OUTPUT_FILE = MODELS_DIR / "all_metrics_v3.csv"
 
 
 def _extract_path_info(csv_path: Path) -> dict[str, str]:
