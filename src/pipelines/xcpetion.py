@@ -21,7 +21,13 @@ from src.pipelines.evaluation import (
     sanitize_inputs,
     sanitize_logits,
 )
-from src.pipelines.training import mixup_batch, mixup_loss
+from src.pipelines.training import (
+    maybe_data_parallel,
+    mixup_batch,
+    mixup_loss,
+    model_state_dict,
+    unwrap_model,
+)
 from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
 logger = logging.getLogger(__name__)
@@ -139,6 +145,7 @@ def run_xception(
     augment: bool = True,
     seed: int = 42,
     max_grad_norm: float | None = 1.0,
+    multi_gpu: bool = True,
 ):
     if not logging.root.handlers:
         logging.basicConfig(
@@ -215,6 +222,8 @@ def run_xception(
     if pretrained:
         _set_trainable_head(model)
     model = model.to(device)
+    model = maybe_data_parallel(model, device, enabled=multi_gpu)
+    base_model = unwrap_model(model)
 
     criterion = nn.CrossEntropyLoss(
         weight=loss_weights.to(device) if use_class_weights else None,
@@ -222,18 +231,18 @@ def run_xception(
     )
     if pretrained:
         param_groups = [
-            {"params": model.fc.parameters(), "lr": learning_rate_head},
-            {"params": model.block12.parameters(), "lr": learning_rate_backbone},
-            {"params": model.conv3.parameters(), "lr": learning_rate_backbone},
-            {"params": model.bn3.parameters(), "lr": learning_rate_backbone},
-            {"params": model.conv4.parameters(), "lr": learning_rate_backbone},
-            {"params": model.bn4.parameters(), "lr": learning_rate_backbone},
+            {"params": base_model.fc.parameters(), "lr": learning_rate_head},
+            {"params": base_model.block12.parameters(), "lr": learning_rate_backbone},
+            {"params": base_model.conv3.parameters(), "lr": learning_rate_backbone},
+            {"params": base_model.bn3.parameters(), "lr": learning_rate_backbone},
+            {"params": base_model.conv4.parameters(), "lr": learning_rate_backbone},
+            {"params": base_model.bn4.parameters(), "lr": learning_rate_backbone},
         ]
     else:
-        fc_params = {id(p) for p in model.fc.parameters()}
-        backbone_params = [p for p in model.parameters() if id(p) not in fc_params]
+        fc_params = {id(p) for p in base_model.fc.parameters()}
+        backbone_params = [p for p in base_model.parameters() if id(p) not in fc_params]
         param_groups = [
-            {"params": model.fc.parameters(), "lr": learning_rate_head},
+            {"params": base_model.fc.parameters(), "lr": learning_rate_head},
             {"params": backbone_params, "lr": learning_rate_backbone},
         ]
     optimizer = torch.optim.AdamW(param_groups, weight_decay=weight_decay)
@@ -326,14 +335,16 @@ def run_xception(
             best_val_auc = val_metrics["auc"]
             best_threshold_value = threshold
             epochs_without_improvement = 0
-            torch.save(model.state_dict(), best_path)
+            torch.save(model_state_dict(model), best_path)
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= early_stop_patience:
                 logger.info("Early stopping at epoch %d", epoch)
                 break
 
-    model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
+    unwrap_model(model).load_state_dict(
+        torch.load(best_path, map_location=device, weights_only=True)
+    )
     test_results = evaluate_classifier(
         model, test_loader, criterion, device, threshold=best_threshold_value
     )
@@ -349,7 +360,7 @@ def run_xception(
         y_pred=test_results["y_pred"],
         threshold=best_threshold_value,
     )
-    torch.save(model.state_dict(), model_dir / "weights" / f"{model_name}.pth")
+    torch.save(model_state_dict(model), model_dir / "weights" / f"{model_name}.pth")
 
     plot_confusion_matrix(test_results, str(model_dir), f"{model_name} Confusion Matrix")
     plot_roc_auc(test_results, str(model_dir), f"{model_name} ROC-AUC Curve")

@@ -49,6 +49,7 @@ def test_vit_pipeline_tiny_run_writes_metrics(tmp_path, tiny_short_split_dataset
         num_attention_heads=4,
         train_backbone=True,
         augment=False,
+        multi_gpu=False,
     )
 
     metrics_path = (

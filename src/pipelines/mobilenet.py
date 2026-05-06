@@ -21,7 +21,13 @@ from src.pipelines.evaluation import (
     evaluate_classifier,
     safe_auc,
 )
-from src.pipelines.training import mixup_batch, mixup_loss
+from src.pipelines.training import (
+    maybe_data_parallel,
+    mixup_batch,
+    mixup_loss,
+    model_state_dict,
+    unwrap_model,
+)
 from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
 logger = logging.getLogger(__name__)
@@ -150,6 +156,7 @@ def run_mobilenet(
     ] = "accuracy",
     augment: bool = True,
     seed: int = 42,
+    multi_gpu: bool = True,
 ):
     if not logging.root.handlers:
         logging.basicConfig(
@@ -237,6 +244,7 @@ def run_mobilenet(
     if pretrained and warmup_epochs <= 0:
         unfreeze_last_blocks(model, last_n_blocks=last_n_blocks)
     model = model.to(device)
+    model = maybe_data_parallel(model, device, enabled=multi_gpu)
 
     criterion = nn.CrossEntropyLoss(
         weight=loss_weights.to(device) if use_class_weights else None,
@@ -244,20 +252,21 @@ def run_mobilenet(
     )
 
     def make_optimizer():
+        base_model = unwrap_model(model)
         param_groups = [
-            {"params": model.classifier.parameters(), "lr": learning_rate_classifier}
+            {"params": base_model.classifier.parameters(), "lr": learning_rate_classifier}
         ]
         if pretrained:
             backbone_params = [
                 p
-                for p in model.features[-last_n_blocks:].parameters()
+                for p in base_model.features[-last_n_blocks:].parameters()
                 if p.requires_grad
             ]
         else:
-            classifier_params = {id(p) for p in model.classifier.parameters()}
+            classifier_params = {id(p) for p in base_model.classifier.parameters()}
             backbone_params = [
                 p
-                for p in model.parameters()
+                for p in base_model.parameters()
                 if p.requires_grad and id(p) not in classifier_params
             ]
         if backbone_params:
@@ -294,7 +303,7 @@ def run_mobilenet(
 
     for epoch in range(1, epochs + 1):
         if pretrained and warmup_epochs > 0 and epoch == warmup_epochs + 1:
-            unfreeze_last_blocks(model, last_n_blocks=last_n_blocks)
+            unfreeze_last_blocks(unwrap_model(model), last_n_blocks=last_n_blocks)
             optimizer = make_optimizer()
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode="max", factor=0.5, patience=2
@@ -361,14 +370,16 @@ def run_mobilenet(
             best_val_auc = val_metrics["auc"]
             best_threshold = threshold
             epochs_without_improvement = 0
-            torch.save(model.state_dict(), best_path)
+            torch.save(model_state_dict(model), best_path)
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= early_stop_patience:
                 logger.info("Early stopping at epoch %d", epoch)
                 break
 
-    model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
+    unwrap_model(model).load_state_dict(
+        torch.load(best_path, map_location=device, weights_only=True)
+    )
     test_results = _evaluate(
         model, test_loader, criterion, device, threshold=best_threshold
     )
@@ -384,7 +395,7 @@ def run_mobilenet(
         y_pred=test_results["y_pred"],
         threshold=best_threshold,
     )
-    torch.save(model.state_dict(), model_dir / "weights" / f"{model_name}.pth")
+    torch.save(model_state_dict(model), model_dir / "weights" / f"{model_name}.pth")
 
     plot_confusion_matrix(
         test_results, str(model_dir), f"{model_name} Confusion Matrix"

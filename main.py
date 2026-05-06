@@ -25,6 +25,7 @@ RAW_MIN = True
 RUN_VIT = True
 BATCH_SIZE = 32
 NUM_WORKERS = 4
+MULTI_GPU = True
 
 
 def main() -> None:
@@ -41,6 +42,7 @@ def main() -> None:
             batch_size=BATCH_SIZE,
             num_workers=NUM_WORKERS,
             pretrained=False,
+            multi_gpu=MULTI_GPU,
         )
 
     for mode in ALL_FOURIER_MODES:
@@ -59,6 +61,7 @@ def main() -> None:
             threshold_strategy="accuracy",
             fourier=mode,
             data_limit=float("inf"),
+            multi_gpu=MULTI_GPU,
         )
 
     for mode in ALL_FOURIER_MODES:
@@ -78,12 +81,31 @@ def main() -> None:
             learning_rate_backbone=3e-5,
             threshold_metric="accuracy",
             data_limit=None,
+            multi_gpu=MULTI_GPU,
         )
 
     if RUN_VIT:
-        for mode in ALL_FOURIER_MODES:
-            logger.info("======== ViT | input=%s ========", mode)
-            run_vit(fourier=mode, epochs=EPOCHS, raw_min=RAW_MIN, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS)
+        logger.info(
+            "======== ViT | somente RGB (pipeline sem modos Fourier) ========"
+        )
+        run_vit(
+            epochs=EPOCHS,
+            raw_min=RAW_MIN,
+            batch_size=BATCH_SIZE,
+            num_workers=NUM_WORKERS,
+            multi_gpu=MULTI_GPU,
+        )
+
+        logger.info(
+            "======== CLIP local | somente RGB (sem pesos externos) ========"
+        )
+        run_clip(
+            epochs=EPOCHS,
+            raw_min=RAW_MIN,
+            batch_size=BATCH_SIZE,
+            num_workers=NUM_WORKERS,
+            multi_gpu=MULTI_GPU,
+        )
 
 
 if __name__ == "__main__":
