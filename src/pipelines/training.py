@@ -1,6 +1,27 @@
 from __future__ import annotations
 
 import torch
+import torch.nn as nn
+
+
+def maybe_data_parallel(
+    model: nn.Module,
+    device: torch.device,
+    enabled: bool = True,
+) -> nn.Module:
+    if enabled and device.type == "cuda" and torch.cuda.device_count() > 1:
+        return nn.DataParallel(model)
+    return model
+
+
+def unwrap_model(model: nn.Module) -> nn.Module:
+    if isinstance(model, nn.DataParallel):
+        return model.module
+    return model
+
+
+def model_state_dict(model: nn.Module):
+    return unwrap_model(model).state_dict()
 
 
 def mixup_batch(

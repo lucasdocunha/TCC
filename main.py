@@ -24,6 +24,7 @@ RAW_MIN = False
 RUN_VIT = True
 BATCH_SIZE = 32
 NUM_WORKERS = 4
+MULTI_GPU = True
 
 
 def main() -> None:
@@ -42,6 +43,7 @@ def main() -> None:
             batch_size=BATCH_SIZE,
             num_workers=NUM_WORKERS,
             pretrained=False,
+            multi_gpu=MULTI_GPU,
         )
 
     for mode in ALL_FOURIER_MODES:
@@ -60,6 +62,7 @@ def main() -> None:
             threshold_strategy="accuracy",
             fourier=mode,
             data_limit=float("inf"),
+            multi_gpu=MULTI_GPU,
         )
 
     for mode in ALL_FOURIER_MODES:
@@ -79,6 +82,7 @@ def main() -> None:
             learning_rate_backbone=3e-5,
             threshold_metric="accuracy",
             data_limit=None,
+            multi_gpu=MULTI_GPU,
         )
 
     if RUN_VIT:
@@ -90,6 +94,7 @@ def main() -> None:
             raw_min=RAW_MIN,
             batch_size=BATCH_SIZE,
             num_workers=NUM_WORKERS,
+            multi_gpu=MULTI_GPU,
         )
 
         logger.info(
@@ -100,6 +105,7 @@ def main() -> None:
             raw_min=RAW_MIN,
             batch_size=BATCH_SIZE,
             num_workers=NUM_WORKERS,
+            multi_gpu=MULTI_GPU,
         )
 
 
