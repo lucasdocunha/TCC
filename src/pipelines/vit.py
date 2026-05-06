@@ -256,9 +256,6 @@ def run_vit(
                 out = model(pixel_values=x).logits
                 loss = criterion(out, y)
             scaler.scale(loss).backward()
-            if max_grad_norm is not None:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
             train_loss += loss.item()
