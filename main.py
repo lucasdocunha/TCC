@@ -7,6 +7,7 @@ ViT: só RGB; roda uma vez ao final se RUN_VIT for True.
 """
 
 from __future__ import annotations
+from dotenv import load_dotenv
 
 import logging
 
@@ -20,7 +21,7 @@ from src.pipelines.clip import run_clip
 logger = logging.getLogger(__name__)
 
 EPOCHS = 50
-RAW_MIN = False
+RAW_MIN = True
 RUN_VIT = True
 BATCH_SIZE = 32
 NUM_WORKERS = 4
@@ -28,10 +29,8 @@ MULTI_GPU = True
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    load_dotenv()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     for mode in ALL_FOURIER_MODES:
         logger.info("======== Xception | input=%s ========", mode)
