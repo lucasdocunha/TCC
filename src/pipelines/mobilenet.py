@@ -7,14 +7,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from scipy.special import softmax
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import transforms
 from tqdm import tqdm
@@ -22,6 +14,14 @@ from tqdm import tqdm
 from src.data import ALL_FOURIER_MODES, FourierMode, ImageDataset
 from src.data.paths import phase1_split_root
 from src.models.mobilenet import freeze_classifier_only, mobilenet, unfreeze_last_blocks
+from src.pipelines.evaluation import (
+    ThresholdMetric,
+    best_threshold,
+    binary_metrics,
+    evaluate_classifier,
+    safe_auc,
+)
+from src.pipelines.training import mixup_batch, mixup_loss
 from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
 logger = logging.getLogger(__name__)
@@ -108,90 +108,19 @@ def _class_balance(
 
 
 def _safe_auc(y_true: np.ndarray, probs: np.ndarray) -> float:
-    if len(np.unique(y_true)) < 2:
-        return 0.0
-    return float(roc_auc_score(y_true, probs))
+    return safe_auc(y_true, probs)
 
 
 def _evaluate(model, loader, criterion, device, threshold: float = 0.5):
-    model.eval()
-    losses, y_true, all_logits, all_ids = [], [], [], []
-
-    with torch.no_grad():
-        for x, y, idx in tqdm(loader, desc="Eval", leave=False):
-            x = x.to(device)
-            y = y.to(device)
-            with _amp_context(device):
-                out = model(x)
-                loss = criterion(out, y)
-
-            losses.append(float(loss.item()))
-            y_true.extend(y.cpu().numpy().tolist())
-            all_logits.append(out.detach().cpu().numpy().astype(np.float32))
-            all_ids.extend(idx.cpu().numpy().tolist())
-
-    logits = np.concatenate(all_logits)
-    probs = softmax(logits, axis=1)[:, 1]
-    y_true = np.asarray(y_true)
-    y_pred = (probs >= threshold).astype(int)
-
-    tn = int(((y_true == 0) & (y_pred == 0)).sum())
-    fp = int(((y_true == 0) & (y_pred == 1)).sum())
-    fn = int(((y_true == 1) & (y_pred == 0)).sum())
-    tp = int(((y_true == 1) & (y_pred == 1)).sum())
-
-    return {
-        "loss": float(np.mean(losses)) if losses else 0.0,
-        "acc": float(accuracy_score(y_true, y_pred)),
-        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
-        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
-        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
-        "auc": _safe_auc(y_true, probs),
-        "specificity": tn / (tn + fp) if (tn + fp) > 0 else 0.0,
-        "tp": tp,
-        "fp": fp,
-        "fn": fn,
-        "tn": tn,
-        "y_true": y_true,
-        "y_pred": y_pred,
-        "probs": probs,
-        "logits": logits,
-        "ids": np.asarray(all_ids),
-    }
+    return evaluate_classifier(model, loader, criterion, device, threshold=threshold)
 
 
 def _best_threshold(
     y_true: np.ndarray,
     probs: np.ndarray,
-    metric: Literal["accuracy", "youden", "f1", "balanced_accuracy"] = "accuracy",
+    metric: ThresholdMetric = "accuracy",
 ) -> tuple[float, float]:
-    thresholds = np.unique(np.concatenate(([0.0, 0.5, 1.0], probs)))
-    best_threshold = 0.5
-    best_score = -1.0
-
-    for threshold in thresholds:
-        y_pred = (probs >= threshold).astype(int)
-        tn = int(((y_true == 0) & (y_pred == 0)).sum())
-        fp = int(((y_true == 0) & (y_pred == 1)).sum())
-        fn = int(((y_true == 1) & (y_pred == 0)).sum())
-        tp = int(((y_true == 1) & (y_pred == 1)).sum())
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-
-        if metric == "f1":
-            score = float(f1_score(y_true, y_pred, zero_division=0))
-        elif metric == "balanced_accuracy":
-            score = (recall + specificity) / 2.0
-        elif metric == "youden":
-            score = recall + specificity - 1.0
-        else:
-            score = float(accuracy_score(y_true, y_pred))
-
-        if score > best_score:
-            best_score = score
-            best_threshold = float(threshold)
-
-    return best_threshold, best_score
+    return best_threshold(y_true, probs, metric=metric)
 
 
 def run_mobilenet(
@@ -203,7 +132,7 @@ def run_mobilenet(
     output_root: str | Path | None = None,
     batch_size: int = 16,
     num_workers: int = 4,
-    pretrained: bool = True,
+    pretrained: bool = False,
     image_size: int = 224,
     learning_rate_classifier: float = 1e-3,
     learning_rate_backbone: float | None = None,
@@ -214,6 +143,8 @@ def run_mobilenet(
     use_weighted_sampler: bool = True,
     use_class_weights: bool = False,
     label_smoothing: float = 0.0,
+    dropout: float | None = None,
+    mixup_alpha: float = 0.0,
     threshold_metric: Literal[
         "accuracy", "youden", "f1", "balanced_accuracy"
     ] = "accuracy",
@@ -248,7 +179,8 @@ def run_mobilenet(
     if last_n_blocks is None:
         last_n_blocks = 4 if variant == "small" else 3
 
-    train_transform, eval_transform = _transforms(image_size, augment=augment)
+    effective_augment = augment and input_mode == "none"
+    train_transform, eval_transform = _transforms(image_size, augment=effective_augment)
     spatial_size = (image_size, image_size) if input_mode != "none" else None
 
     train = ImageDataset(
@@ -298,9 +230,11 @@ def run_mobilenet(
         in_channels=sample_x.shape[0],
         pretrained=pretrained,
         variant=variant,
+        dropout=dropout,
     )
-    freeze_classifier_only(model)
-    if warmup_epochs <= 0:
+    if pretrained:
+        freeze_classifier_only(model)
+    if pretrained and warmup_epochs <= 0:
         unfreeze_last_blocks(model, last_n_blocks=last_n_blocks)
     model = model.to(device)
 
@@ -313,9 +247,19 @@ def run_mobilenet(
         param_groups = [
             {"params": model.classifier.parameters(), "lr": learning_rate_classifier}
         ]
-        backbone_params = [
-            p for p in model.features[-last_n_blocks:].parameters() if p.requires_grad
-        ]
+        if pretrained:
+            backbone_params = [
+                p
+                for p in model.features[-last_n_blocks:].parameters()
+                if p.requires_grad
+            ]
+        else:
+            classifier_params = {id(p) for p in model.classifier.parameters()}
+            backbone_params = [
+                p
+                for p in model.parameters()
+                if p.requires_grad and id(p) not in classifier_params
+            ]
         if backbone_params:
             param_groups.append(
                 {"params": backbone_params, "lr": learning_rate_backbone}
@@ -349,7 +293,7 @@ def run_mobilenet(
     epochs_run = 0
 
     for epoch in range(1, epochs + 1):
-        if warmup_epochs > 0 and epoch == warmup_epochs + 1:
+        if pretrained and warmup_epochs > 0 and epoch == warmup_epochs + 1:
             unfreeze_last_blocks(model, last_n_blocks=last_n_blocks)
             optimizer = make_optimizer()
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -366,8 +310,9 @@ def run_mobilenet(
             optimizer.zero_grad(set_to_none=True)
 
             with _amp_context(device):
-                out = model(x)
-                loss = criterion(out, y)
+                train_x, y_a, y_b, lam = mixup_batch(x, y, mixup_alpha)
+                out = model(train_x)
+                loss = mixup_loss(criterion, out, y_a, y_b, lam)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -384,10 +329,16 @@ def run_mobilenet(
             val_base["probs"],
             metric=threshold_metric,
         )
-        val_metrics = _evaluate(
-            model, val_loader, criterion, device, threshold=threshold
+        val_metrics = binary_metrics(
+            val_base["y_true"],
+            val_base["probs"],
+            threshold=threshold,
+            loss=val_base["loss"],
+            logits=val_base["logits"],
+            ids=val_base["ids"],
         )
-        scheduler.step(val_metrics["auc"])
+        selection_score = threshold_score
+        scheduler.step(selection_score)
 
         train_loss /= max(len(train_loader), 1)
         train_acc = train_correct / max(train_total, 1)
@@ -404,11 +355,9 @@ def run_mobilenet(
             threshold_score,
         )
 
-        checkpoint_score = (
-            val_metrics["auc"] if val_metrics["auc"] > 0.0 else val_metrics["acc"]
-        )
-        if checkpoint_score > best_score:
-            best_score = checkpoint_score
+        current_score = selection_score
+        if current_score > best_score:
+            best_score = current_score
             best_val_auc = val_metrics["auc"]
             best_threshold = threshold
             epochs_without_improvement = 0
@@ -419,7 +368,7 @@ def run_mobilenet(
                 logger.info("Early stopping at epoch %d", epoch)
                 break
 
-    model.load_state_dict(torch.load(best_path, map_location=device))
+    model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
     test_results = _evaluate(
         model, test_loader, criterion, device, threshold=best_threshold
     )
@@ -433,6 +382,7 @@ def run_mobilenet(
         probs=test_results["probs"],
         y_true=test_results["y_true"],
         y_pred=test_results["y_pred"],
+        threshold=best_threshold,
     )
     torch.save(model.state_dict(), model_dir / "weights" / f"{model_name}.pth")
 
@@ -460,9 +410,12 @@ def run_mobilenet(
             "use_weighted_sampler": use_weighted_sampler,
             "use_class_weights": use_class_weights,
             "label_smoothing": label_smoothing,
+            "dropout": dropout,
+            "mixup_alpha": mixup_alpha,
             "learning_rate_classifier": learning_rate_classifier,
             "learning_rate_backbone": learning_rate_backbone,
-            "augment": augment,
+            "augment": effective_augment,
+            "augment_requested": augment,
         },
     )
 

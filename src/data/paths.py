@@ -12,10 +12,19 @@ import os
 from pathlib import Path
 
 _SPLIT_TO_SUBDIR = {"train": "trainset", "val": "valset", "test": "testset"}
+_SPLIT_TO_SHORT_SUBDIR = {"train": "train", "val": "val", "test": "test"}
 
 _DEFAULT_ROOT = Path("/media/ssd2/lucas.ocunha/datasets/phase1")
 
 
 def phase1_split_root(split: str) -> Path:
     base = Path(os.environ.get("TCC_DATASET_ROOT", str(_DEFAULT_ROOT)))
-    return base / _SPLIT_TO_SUBDIR[split]
+    canonical = base / _SPLIT_TO_SUBDIR[split]
+    if canonical.exists():
+        return canonical
+
+    short = base / _SPLIT_TO_SHORT_SUBDIR[split]
+    if short.exists():
+        return short
+
+    return canonical

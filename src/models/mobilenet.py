@@ -6,8 +6,8 @@ from torchvision import models
 
 
 _VARIANTS = {
-    "small": (models.mobilenet_v3_small, models.MobileNet_V3_Small_Weights.DEFAULT),
-    "large": (models.mobilenet_v3_large, models.MobileNet_V3_Large_Weights.DEFAULT),
+    "small": models.mobilenet_v3_small,
+    "large": models.mobilenet_v3_large,
 }
 
 
@@ -53,39 +53,58 @@ def _adapt_first_conv(model: nn.Module, in_channels: int, pretrained: bool) -> N
 def mobilenet(
     num_classes: int = 2,
     in_channels: int = 3,
-    pretrained: bool = True,
+    pretrained: bool = False,
     variant: str = "small",
+    dropout: float | None = None,
 ) -> nn.Module:
     if variant not in _VARIANTS:
         valid = ", ".join(sorted(_VARIANTS))
         raise ValueError(f"variant must be one of: {valid}")
 
-    builder, weights_enum = _VARIANTS[variant]
-    model = builder(weights=weights_enum if pretrained else None)
+    if pretrained:
+        raise ValueError("External pretrained MobileNet weights are disabled for this project.")
+    builder = _VARIANTS[variant]
+    model = builder(weights=None)
     _adapt_first_conv(model, in_channels, pretrained=pretrained)
 
     last_linear = model.classifier[-1]
     if not isinstance(last_linear, nn.Linear):
         raise TypeError("Expected MobileNet classifier to end with Linear.")
+    if dropout is not None:
+        for module in model.classifier.modules():
+            if isinstance(module, nn.Dropout):
+                module.p = dropout
     model.classifier[-1] = nn.Linear(last_linear.in_features, num_classes)
     return model
 
 
-def mobilenetv3_small(num_classes: int = 2, in_channels: int = 3, pretrained: bool = True) -> nn.Module:
+def mobilenetv3_small(
+    num_classes: int = 2,
+    in_channels: int = 3,
+    pretrained: bool = False,
+    dropout: float | None = None,
+) -> nn.Module:
     return mobilenet(
         num_classes=num_classes,
         in_channels=in_channels,
         pretrained=pretrained,
         variant="small",
+        dropout=dropout,
     )
 
 
-def mobilenetv3_large(num_classes: int = 2, in_channels: int = 3, pretrained: bool = True) -> nn.Module:
+def mobilenetv3_large(
+    num_classes: int = 2,
+    in_channels: int = 3,
+    pretrained: bool = False,
+    dropout: float | None = None,
+) -> nn.Module:
     return mobilenet(
         num_classes=num_classes,
         in_channels=in_channels,
         pretrained=pretrained,
         variant="large",
+        dropout=dropout,
     )
 
 
