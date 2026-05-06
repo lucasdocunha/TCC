@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest
 import torch
 
 
@@ -17,7 +18,14 @@ def test_mobilenet_accepts_rgb_frequency_and_concat_channels():
         assert out.shape == (2, 2)
 
 
-def test_mobilenet_pipeline_tiny_run_writes_metrics(tmp_path):
+def test_mobilenet_rejects_external_pretrained_weights():
+    from src.models.mobilenet import mobilenetv3_small
+
+    with pytest.raises(ValueError, match="pretrained"):
+        mobilenetv3_small(num_classes=2, pretrained=True)
+
+
+def test_mobilenet_pipeline_tiny_run_writes_metrics(tmp_path, tiny_phase1_dataset):
     from src.pipelines.mobilenet import run_mobilenet
 
     results = run_mobilenet(
@@ -46,7 +54,9 @@ def test_mobilenet_pipeline_tiny_run_writes_metrics(tmp_path):
     assert metrics_path.exists()
 
 
-def test_resnet_pipeline_accepts_six_channel_concat_frequency(tmp_path):
+def test_resnet_pipeline_accepts_six_channel_concat_frequency(
+    tmp_path, tiny_phase1_dataset
+):
     from src.pipelines.resnet import run_resnet
 
     run_resnet(

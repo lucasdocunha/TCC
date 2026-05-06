@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 
@@ -7,11 +9,11 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import transforms
-import tqdm
+from tqdm import tqdm
 
-from src.data import ALL_FOURIER_MODES, FourierMode, ImageDataset
+from src.data import ImageDataset
 from src.data.paths import phase1_split_root
-from src.models import xception
+from src.models.clip import CLIPVisionClassifier, MEAN, STD, clip_safe_name
 from src.pipelines.evaluation import (
     ThresholdMetric,
     amp_context,
@@ -36,8 +38,6 @@ def _split_root(_pwd: Path, _raw_min: bool, split: str) -> Path:
 
 
 def _transforms(image_size: int, augment: bool = True):
-    mean = [0.5, 0.5, 0.5]
-    std = [0.5, 0.5, 0.5]
     if augment:
         train_transform = transforms.Compose(
             [
@@ -54,7 +54,7 @@ def _transforms(image_size: int, augment: bool = True):
                     p=0.5,
                 ),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=mean, std=std),
+                transforms.Normalize(mean=MEAN, std=STD),
             ]
         )
     else:
@@ -62,14 +62,15 @@ def _transforms(image_size: int, augment: bool = True):
             [
                 transforms.Resize((image_size, image_size)),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=mean, std=std),
+                transforms.Normalize(mean=MEAN, std=STD),
             ]
         )
+
     eval_transform = transforms.Compose(
         [
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
+            transforms.Normalize(mean=MEAN, std=STD),
         ]
     )
     return train_transform, eval_transform
@@ -99,46 +100,38 @@ def _class_balance(
     return loss_weights, sampler, counts
 
 
-def _set_trainable_head(model: nn.Module) -> None:
-    for param in model.parameters():
-        param.requires_grad = False
-
-    trainable_modules = [
-        model.block12,
-        model.conv3,
-        model.bn3,
-        model.conv4,
-        model.bn4,
-        model.fc,
-    ]
-    for module in trainable_modules:
-        for param in module.parameters():
-            param.requires_grad = True
+def _clip_logits(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    return model(x)
 
 
-def run_xception(
-    fourier: FourierMode = "none",
+def run_clip(
     epochs: int = 20,
     raw_min: bool = True,
     data_limit: int | float | None = None,
     output_root: str | Path | None = None,
-    batch_size: int = 32,
+    batch_size: int = 16,
     num_workers: int = 4,
-    pretrained: bool = False,
-    image_size: int = 299,
-    learning_rate_head: float = 1e-3,
+    image_size: int = 224,
+    patch_size: int = 16,
+    hidden_size: int = 256,
+    projection_dim: int = 128,
+    num_hidden_layers: int = 6,
+    num_attention_heads: int = 8,
+    dropout: float = 0.2,
+    train_backbone: bool = True,
+    last_n_layers: int = 2,
+    learning_rate_head: float = 5e-4,
     learning_rate_backbone: float = 1e-4,
     weight_decay: float = 1e-4,
-    early_stop_patience: int = 8,
+    early_stop_patience: int = 6,
     use_weighted_sampler: bool = True,
-    use_class_weights: bool = False,
+    use_class_weights: bool = True,
     label_smoothing: float = 0.0,
-    dropout: float = 0.2,
-    mixup_alpha: float = 0.0,
     threshold_metric: ThresholdMetric = "accuracy",
     augment: bool = True,
     seed: int = 42,
     max_grad_norm: float | None = 1.0,
+    mixup_alpha: float = 0.0,
 ):
     if not logging.root.handlers:
         logging.basicConfig(
@@ -156,37 +149,35 @@ def run_xception(
     device = _device()
     pin_memory = device.type == "cuda"
     persistent_workers = num_workers > 0
-    model_name = "xception"
-    run_dir = fourier if data_limit == np.inf else f"{fourier}_limit{data_limit}"
-    model_dir = output_root / "models" / model_name / run_dir
+    model_name = "clip"
+    safe_model = clip_safe_name()
+    run_dir = "none" if data_limit == np.inf else f"none_limit{data_limit}"
+    model_dir = output_root / "models" / model_name / safe_model / run_dir
 
-    effective_augment = augment and fourier == "none"
-    train_transform, eval_transform = _transforms(image_size, augment=effective_augment)
-    spatial_size = (image_size, image_size) if fourier != "none" else None
-
+    train_transform, eval_transform = _transforms(image_size, augment=augment)
     train = ImageDataset(
         file_csv=data_dir / "train.csv",
         images_dir=_split_root(pwd, raw_min, "train"),
         transform=train_transform,
         data_limit=data_limit,
-        fourier=fourier,
-        spatial_size=spatial_size,
+        fourier="none",
+        spatial_size=None,
     )
     val = ImageDataset(
         file_csv=data_dir / "val.csv",
         images_dir=_split_root(pwd, raw_min, "val"),
         transform=eval_transform,
         data_limit=data_limit,
-        fourier=fourier,
-        spatial_size=spatial_size,
+        fourier="none",
+        spatial_size=None,
     )
     test = ImageDataset(
         file_csv=data_dir / "test.csv",
         images_dir=_split_root(pwd, raw_min, "test"),
         transform=eval_transform,
         data_limit=data_limit,
-        fourier=fourier,
-        spatial_size=spatial_size,
+        fourier="none",
+        spatial_size=None,
     )
 
     loss_weights, sampler, class_counts = _class_balance(data_dir / "train.csv")
@@ -205,37 +196,37 @@ def run_xception(
     val_loader = DataLoader(val, shuffle=False, **loader_kwargs)
     test_loader = DataLoader(test, shuffle=False, **loader_kwargs)
 
-    sample_x, _, _ = train[0]
-    model = xception(
-        pretrained=pretrained,
-        in_channels=sample_x.shape[0],
+    model = CLIPVisionClassifier(
         num_classes=2,
         dropout=dropout,
+        image_size=image_size,
+        patch_size=patch_size,
+        hidden_size=hidden_size,
+        projection_dim=projection_dim,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
     )
-    if pretrained:
-        _set_trainable_head(model)
+    if not train_backbone:
+        model.freeze_backbone()
     model = model.to(device)
 
     criterion = nn.CrossEntropyLoss(
         weight=loss_weights.to(device) if use_class_weights else None,
         label_smoothing=label_smoothing,
     )
-    if pretrained:
-        param_groups = [
-            {"params": model.fc.parameters(), "lr": learning_rate_head},
-            {"params": model.block12.parameters(), "lr": learning_rate_backbone},
-            {"params": model.conv3.parameters(), "lr": learning_rate_backbone},
-            {"params": model.bn3.parameters(), "lr": learning_rate_backbone},
-            {"params": model.conv4.parameters(), "lr": learning_rate_backbone},
-            {"params": model.bn4.parameters(), "lr": learning_rate_backbone},
-        ]
-    else:
-        fc_params = {id(p) for p in model.fc.parameters()}
-        backbone_params = [p for p in model.parameters() if id(p) not in fc_params]
-        param_groups = [
-            {"params": model.fc.parameters(), "lr": learning_rate_head},
-            {"params": backbone_params, "lr": learning_rate_backbone},
-        ]
+    param_groups = [{"params": model.head.parameters(), "lr": learning_rate_head}]
+    visual_params = [p for p in model.visual_proj.parameters() if p.requires_grad]
+    if visual_params:
+        param_groups.append({"params": visual_params, "lr": learning_rate_backbone})
+    head_params = {id(p) for p in model.head.parameters()}
+    visual_param_ids = {id(p) for p in model.visual_proj.parameters()}
+    backbone_params = [
+        p
+        for p in model.parameters()
+        if p.requires_grad and id(p) not in head_params and id(p) not in visual_param_ids
+    ]
+    if backbone_params:
+        param_groups.append({"params": backbone_params, "lr": learning_rate_backbone})
     optimizer = torch.optim.AdamW(param_groups, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=0.5, patience=3
@@ -243,9 +234,7 @@ def run_xception(
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
 
     logger.info(
-        "Starting Xception: mode=%s channels=%d train=%d val=%d test=%d classes=%s device=%s",
-        fourier,
-        sample_x.shape[0],
+        "Starting CLIP from scratch: train=%d val=%d test=%d classes=%s device=%s",
         len(train),
         len(val),
         len(test),
@@ -261,12 +250,12 @@ def run_xception(
     best_path = model_dir / "weights" / f"best_{model_name}.pth"
     best_path.parent.mkdir(parents=True, exist_ok=True)
 
-    for epoch in tqdm.tqdm(range(1, epochs + 1), desc="Epochs"):
+    for epoch in tqdm(range(1, epochs + 1), desc="Epochs"):
         model.train()
         train_loss, train_correct, train_total = 0.0, 0, 0
 
-        for x, y, _ in tqdm.tqdm(
-            train_loader, desc=f"Xception train {epoch}/{epochs}", leave=False
+        for x, y, _ in tqdm(
+            train_loader, desc=f"CLIP train {epoch}/{epochs}", leave=False
         ):
             x = sanitize_inputs(x.to(device))
             y = y.to(device)
@@ -290,7 +279,9 @@ def run_xception(
             train_total += int(y.size(0))
 
         epochs_run = epoch
-        val_base = evaluate_classifier(model, val_loader, criterion, device)
+        val_base = evaluate_classifier(
+            model, val_loader, criterion, device, forward_fn=_clip_logits
+        )
         threshold, threshold_score = best_threshold(
             val_base["y_true"], val_base["probs"], metric=threshold_metric
         )
@@ -335,7 +326,12 @@ def run_xception(
 
     model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
     test_results = evaluate_classifier(
-        model, test_loader, criterion, device, threshold=best_threshold_value
+        model,
+        test_loader,
+        criterion,
+        device,
+        threshold=best_threshold_value,
+        forward_fn=_clip_logits,
     )
 
     (model_dir / "weights").mkdir(parents=True, exist_ok=True)
@@ -358,29 +354,32 @@ def run_xception(
         str(model_dir),
         extra_info={
             "model": model_name,
-            "fourier": fourier,
-            "in_channels": sample_x.shape[0],
+            "architecture": safe_model,
             "image_size": image_size,
+            "patch_size": patch_size,
+            "hidden_size": hidden_size,
+            "projection_dim": projection_dim,
+            "num_hidden_layers": num_hidden_layers,
+            "num_attention_heads": num_attention_heads,
             "epochs_requested": epochs,
             "epochs_run": epochs_run,
             "best_val_auc": best_val_auc,
             "threshold": best_threshold_value,
             "threshold_metric": threshold_metric,
-            "pretrained": pretrained,
+            "train_backbone": train_backbone,
+            "last_n_layers": last_n_layers,
             "use_weighted_sampler": use_weighted_sampler,
             "use_class_weights": use_class_weights,
             "label_smoothing": label_smoothing,
-            "dropout": dropout,
             "mixup_alpha": mixup_alpha,
             "learning_rate_head": learning_rate_head,
             "learning_rate_backbone": learning_rate_backbone,
-            "augment": effective_augment,
-            "augment_requested": augment,
+            "augment": augment,
         },
     )
 
     logger.info(
-        "Xception test: acc=%.4f precision=%.4f recall=%.4f f1=%.4f auc=%.4f specificity=%.4f",
+        "CLIP test: acc=%.4f precision=%.4f recall=%.4f f1=%.4f auc=%.4f specificity=%.4f",
         test_results["acc"],
         test_results["precision"],
         test_results["recall"],
@@ -389,7 +388,3 @@ def run_xception(
         test_results["specificity"],
     )
     return test_results
-
-
-def run_all_xception_modes(**kwargs):
-    return {mode: run_xception(fourier=mode, **kwargs) for mode in ALL_FOURIER_MODES}

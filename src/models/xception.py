@@ -24,17 +24,10 @@ Código disponível em: https://github.com/tstandley/Xception-PyTorch/blob/maste
 import math
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.model_zoo as model_zoo
 from torch.nn import init
 import torch
 
 __all__ = ['xception']
-
-model_urls = {
-#     'xception':'https://www.dropbox.com/s/1hplpzet9d7dv29/xception-c0a72b38.pth.tar?dl=1'
-    'xception':'http://data.lip6.fr/cadene/pretrainedmodels/xception-43020ad28.pth'
-}
-
 
 class SeparableConv2d(nn.Module):
     def __init__(self,in_channels,out_channels,kernel_size=1,stride=1,padding=0,dilation=1,bias=False):
@@ -107,7 +100,7 @@ class Xception(nn.Module):
     Xception optimized for the ImageNet dataset, as specified in
     https://arxiv.org/pdf/1610.02357.pdf
     """
-    def __init__(self, num_classes=1000, in_channels=3):
+    def __init__(self, num_classes=1000, in_channels=3, dropout=0.2):
         """ Constructor
         Args:
             num_classes: number of classes
@@ -150,6 +143,7 @@ class Xception(nn.Module):
         self.conv4 = SeparableConv2d(1536,2048,3,1,1)
         self.bn4 = nn.BatchNorm2d(2048)
 
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.fc = nn.Linear(2048, num_classes)
 
 
@@ -196,6 +190,7 @@ class Xception(nn.Module):
 
         x = F.adaptive_avg_pool2d(x, (1, 1))
         x = x.view(x.size(0), -1)
+        x = self.dropout(x)
         x = self.fc(x)
 
         return x
@@ -207,27 +202,7 @@ def xception(pretrained=False,**kwargs):
     Construct Xception.
     """
 
-    model = Xception(**kwargs)
     if pretrained:
-        state_dict = model_zoo.load_url(model_urls['xception'])
-        in_channels = kwargs.get("in_channels", 3)
-
-        if in_channels != 3:
-            conv1_weight = state_dict["conv1.weight"]  # [32, 3, 3, 3]
-
-            if in_channels == 1:
-                # cinza: média dos pesos RGB
-                conv1_weight = conv1_weight.mean(dim=1, keepdim=True)
-            elif in_channels > 3:
-                # mais canais (ex.: RGB + Fourier): repete e corta
-                repeat_factor = (in_channels + 2) // 3
-                conv1_weight = conv1_weight.repeat(1, repeat_factor, 1, 1)[:, :in_channels, :, :]
-                conv1_weight = conv1_weight * (3.0 / float(in_channels))
-            else:
-                # menos canais e diferente de 1 (ex.: 2 canais)
-                conv1_weight = conv1_weight[:, :in_channels, :, :]
-
-            state_dict["conv1.weight"] = conv1_weight
-
-        model.load_state_dict(state_dict, strict=False)
+        raise ValueError("External pretrained Xception weights are disabled for this project.")
+    model = Xception(**kwargs)
     return model

@@ -8,6 +8,8 @@ from sklearn.metrics import (
     precision_score, recall_score, f1_score, accuracy_score
 )
 
+from src.pipelines.evaluation import clean_probabilities, probabilities_from_logits
+
 
 def plot_confusion_matrix(
     test_results: dict,
@@ -31,8 +33,14 @@ def plot_confusion_matrix(
     y_true = test_results["y_true"]
     y_pred = test_results["y_pred"]
 
-    cm = confusion_matrix(y_true, y_pred)
-    cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)  # row-normalized
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    row_sums = cm.sum(axis=1, keepdims=True)
+    cm_norm = np.divide(
+        cm.astype(float),
+        row_sums,
+        out=np.zeros_like(cm, dtype=float),
+        where=row_sums != 0,
+    )
 
     acc       = accuracy_score(y_true, y_pred)
     precision = precision_score(y_true, y_pred, zero_division=0)
@@ -117,18 +125,24 @@ def plot_roc_auc(
 
     # aceita tanto 'probs' quanto 'logits' como fallback
     if "probs" in test_results:
-        scores = np.array(test_results["probs"])
+        scores = clean_probabilities(np.array(test_results["probs"]))
     else:
         logits = np.array(test_results["logits"])
-        # sigmoid para converter logits → probabilidade
-        scores = 1 / (1 + np.exp(-logits))
+        scores = probabilities_from_logits(logits) if logits.ndim == 2 else logits
 
     # se vier shape (N, 2), pega coluna 1
     if scores.ndim == 2:
         scores = scores[:, 1]
+    scores = clean_probabilities(scores)
 
-    fpr, tpr, thresholds = roc_curve(y_true, scores)
-    auc = roc_auc_score(y_true, scores)
+    if len(np.unique(y_true)) < 2:
+        fpr = np.array([0.0, 1.0])
+        tpr = np.array([0.0, 1.0])
+        thresholds = np.array([0.5, 0.5])
+        auc = 0.0
+    else:
+        fpr, tpr, thresholds = roc_curve(y_true, scores)
+        auc = roc_auc_score(y_true, scores)
 
     # ponto de maior Youden Index (sensibilidade + especificidade - 1)
     youden_idx = np.argmax(tpr - fpr)
@@ -199,7 +213,7 @@ def save_metrics_csv(
     if "recall" not in summary:
         summary["recall"] = recall_score(y_true, y_pred, zero_division=0)
     if "specificity" not in summary:
-        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
         summary["specificity"] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
         summary["tp"], summary["fp"] = int(tp), int(fp)
         summary["fn"], summary["tn"] = int(fn), int(tn)
@@ -219,13 +233,13 @@ def save_metrics_csv(
         probs = np.array(test_results["probs"])
     else:
         logits = np.array(test_results["logits"])
-        probs = 1 / (1 + np.exp(-logits))
+        probs = probabilities_from_logits(logits) if logits.ndim == 2 else logits
 
     if probs.ndim == 2:
-        pred_df["prob_neg"] = probs[:, 0]
-        pred_df["prob_pos"] = probs[:, 1]
+        pred_df["prob_neg"] = clean_probabilities(probs[:, 0])
+        pred_df["prob_pos"] = clean_probabilities(probs[:, 1])
     else:
-        pred_df["prob_pos"] = probs
+        pred_df["prob_pos"] = clean_probabilities(probs)
 
     pred_df["correct"] = (pred_df["y_true"] == pred_df["y_pred"]).astype(int)
 

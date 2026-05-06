@@ -7,14 +7,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from scipy.special import softmax
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import transforms
 import tqdm
@@ -22,6 +14,13 @@ import tqdm
 from src.data import FourierMode, ImageDataset
 from src.data.paths import phase1_split_root
 from src.models.resnet import freeze_backbone, resnet, unfreeze_last_blocks
+from src.pipelines.evaluation import (
+    ThresholdMetric,
+    binary_metrics,
+    best_threshold,
+    evaluate_classifier,
+)
+from src.pipelines.training import mixup_batch, mixup_loss
 from src.plots import plot_confusion_matrix, plot_roc_auc, save_metrics_csv
 
 logger = logging.getLogger(__name__)
@@ -115,80 +114,17 @@ def _class_weights(
 def _best_accuracy_threshold(
     y_true: np.ndarray, probs: np.ndarray
 ) -> tuple[float, float]:
-    thresholds = np.unique(np.concatenate(([0.0, 0.5, 1.0], probs)))
-    best_threshold = 0.5
-    best_acc = -1.0
-
-    for threshold in thresholds:
-        preds = (probs >= threshold).astype(int)
-        acc = accuracy_score(y_true, preds)
-        if acc > best_acc:
-            best_acc = acc
-            best_threshold = float(threshold)
-
-    return best_threshold, best_acc
+    return best_threshold(y_true, probs, metric="accuracy")
 
 
 def _best_youden_threshold(
     y_true: np.ndarray, probs: np.ndarray
 ) -> tuple[float, float]:
-    thresholds = np.unique(np.concatenate(([0.0, 0.5, 1.0], probs)))
-    best_threshold = 0.5
-    best_score = -1.0
-
-    for threshold in thresholds:
-        preds = (probs >= threshold).astype(int)
-        tn = int(((y_true == 0) & (preds == 0)).sum())
-        fp = int(((y_true == 0) & (preds == 1)).sum())
-        fn = int(((y_true == 1) & (preds == 0)).sum())
-        tp = int(((y_true == 1) & (preds == 1)).sum())
-        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-        score = sensitivity + specificity - 1.0
-        if score > best_score:
-            best_score = score
-            best_threshold = float(threshold)
-
-    return best_threshold, best_score
+    return best_threshold(y_true, probs, metric="youden")
 
 
 def _evaluate(model, loader, criterion, device, threshold: float = 0.5):
-    model.eval()
-    total_loss = 0.0
-    y_true, all_logits, all_ids = [], [], []
-
-    with torch.no_grad():
-        for x, y, idx in tqdm.tqdm(loader, desc="Eval", leave=False):
-            x = x.to(device)
-            y = y.to(device)
-
-            with _amp_context(device):
-                out = model(x)
-                loss = criterion(out, y)
-
-            total_loss += loss.item()
-            y_true.extend(y.cpu().numpy())
-            all_logits.append(out.detach().cpu().numpy().astype(np.float32))
-            all_ids.extend(idx.cpu().numpy())
-
-    logits = np.concatenate(all_logits)
-    probs = softmax(logits, axis=1)[:, 1]
-    y_true = np.array(y_true)
-    y_pred = (probs >= threshold).astype(int)
-
-    return {
-        "loss": total_loss / max(len(loader), 1),
-        "acc": accuracy_score(y_true, y_pred),
-        "precision": precision_score(y_true, y_pred, zero_division=0),
-        "recall": recall_score(y_true, y_pred, zero_division=0),
-        "f1": f1_score(y_true, y_pred, zero_division=0),
-        "auc": 0.0 if len(np.unique(y_true)) < 2 else roc_auc_score(y_true, probs),
-        "y_true": y_true,
-        "y_pred": y_pred,
-        "probs": probs,
-        "logits": logits,
-        "ids": np.array(all_ids),
-    }
+    return evaluate_classifier(model, loader, criterion, device, threshold=threshold)
 
 
 def run_resnet(
@@ -199,7 +135,7 @@ def run_resnet(
     output_root: str | Path | None = None,
     batch_size: int = 32,
     num_workers: int = 4,
-    pretrained: bool = True,
+    pretrained: bool = False,
     architecture: str = "resnet18",
     image_size: int = 224,
     train_backbone: bool = True,
@@ -210,9 +146,13 @@ def run_resnet(
     early_stop_patience: int = 8,
     use_weighted_sampler: bool = True,
     use_class_weights: bool = False,
+    label_smoothing: float = 0.0,
     augment: bool = True,
-    threshold_strategy: str = "accuracy",
+    threshold_strategy: ThresholdMetric | str = "accuracy",
     seed: int = 42,
+    dropout: float = 0.2,
+    max_grad_norm: float | None = 1.0,
+    mixup_alpha: float = 0.0,
 ):
     if not logging.root.handlers:
         logging.basicConfig(
@@ -238,7 +178,8 @@ def run_resnet(
         device,
     )
 
-    train_transform, eval_transform = _transforms(image_size, augment=augment)
+    effective_augment = augment and fourier == "none"
+    train_transform, eval_transform = _transforms(image_size, augment=effective_augment)
     spatial_size = (image_size, image_size) if fourier != "none" else None
     data_dir = pwd / "data" / ("raw_min" if raw_min else "raw")
 
@@ -310,18 +251,25 @@ def run_resnet(
         num_classes=2,
         pretrained=pretrained,
         architecture=architecture,
+        dropout=dropout,
         in_channels=sample_x.shape[0],
     )
-    freeze_backbone(model)
-    if train_backbone:
+    if pretrained:
+        freeze_backbone(model)
+    if train_backbone and pretrained:
         unfreeze_last_blocks(model, train_layer3=train_layer3)
     model = model.to(device)
 
     criterion = nn.CrossEntropyLoss(
-        weight=loss_weights.to(device) if use_class_weights else None
+        weight=loss_weights.to(device) if use_class_weights else None,
+        label_smoothing=label_smoothing,
     )
     param_groups = [{"params": model.fc.parameters(), "lr": learning_rate_head}]
-    if train_backbone:
+    if train_backbone and not pretrained:
+        fc_params = {id(p) for p in model.fc.parameters()}
+        backbone_params = [p for p in model.parameters() if id(p) not in fc_params]
+        param_groups.append({"params": backbone_params, "lr": learning_rate_backbone})
+    elif train_backbone:
         param_groups.append(
             {"params": model.layer4.parameters(), "lr": learning_rate_backbone}
         )
@@ -344,7 +292,7 @@ def run_resnet(
 
     best_score = -1.0
     best_val_auc = 0.0
-    best_threshold = 0.5
+    best_threshold_value = 0.5
     epochs_without_improvement = 0
     model_dir = output_root / "models" / model_name
     if fourier != "none":
@@ -364,14 +312,20 @@ def run_resnet(
             optimizer.zero_grad(set_to_none=True)
 
             with _amp_context(device):
-                out = model(x)
-                loss = criterion(out, y)
+                train_x, y_a, y_b, lam = mixup_batch(x, y, mixup_alpha)
+                out = model(train_x)
+                loss = mixup_loss(criterion, out, y_a, y_b, lam)
 
             if scaler is None:
                 loss.backward()
+                if max_grad_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 optimizer.step()
             else:
                 scaler.scale(loss).backward()
+                if max_grad_norm is not None:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 scaler.step(optimizer)
                 scaler.update()
 
@@ -379,26 +333,30 @@ def run_resnet(
             train_correct += (out.argmax(1) == y).sum().item()
             train_total += y.size(0)
 
-        val_metrics = _evaluate(model, val_loader, criterion, device)
-        if threshold_strategy == "accuracy":
-            threshold, threshold_score = _best_accuracy_threshold(
-                val_metrics["y_true"], val_metrics["probs"]
+        val_base = _evaluate(model, val_loader, criterion, device)
+        if threshold_strategy == "fixed":
+            threshold, threshold_score = 0.5, val_base["acc"]
+        elif threshold_strategy in ("accuracy", "youden", "f1", "balanced_accuracy"):
+            threshold, threshold_score = best_threshold(
+                val_base["y_true"],
+                val_base["probs"],
+                metric=threshold_strategy,
             )
-        elif threshold_strategy == "youden":
-            threshold, threshold_score = _best_youden_threshold(
-                val_metrics["y_true"], val_metrics["probs"]
-            )
-        elif threshold_strategy == "fixed":
-            threshold, threshold_score = 0.5, val_metrics["acc"]
         else:
             raise ValueError(
-                "threshold_strategy must be 'accuracy', 'youden', or 'fixed'"
+                "threshold_strategy must be 'accuracy', 'youden', 'f1', 'balanced_accuracy', or 'fixed'"
             )
-        val_metrics = _evaluate(
-            model, val_loader, criterion, device, threshold=threshold
+        val_metrics = binary_metrics(
+            val_base["y_true"],
+            val_base["probs"],
+            threshold=threshold,
+            loss=val_base["loss"],
+            logits=val_base["logits"],
+            ids=val_base["ids"],
         )
 
-        scheduler.step(val_metrics["auc"])
+        selection_score = threshold_score
+        scheduler.step(selection_score)
         train_loss /= max(len(train_loader), 1)
         train_acc = train_correct / max(train_total, 1)
 
@@ -415,13 +373,11 @@ def run_resnet(
             threshold_score,
         )
 
-        checkpoint_score = (
-            val_metrics["auc"] if val_metrics["auc"] > 0.0 else val_metrics["acc"]
-        )
-        if checkpoint_score > best_score:
-            best_score = checkpoint_score
+        current_score = selection_score
+        if current_score > best_score:
+            best_score = current_score
             best_val_auc = val_metrics["auc"]
-            best_threshold = threshold
+            best_threshold_value = threshold
             epochs_without_improvement = 0
             torch.save(model.state_dict(), best_path)
             logger.info("Novo melhor checkpoint salvo em %s", best_path)
@@ -431,9 +387,9 @@ def run_resnet(
                 logger.info("Early stopping ativado na época %d.", epoch + 1)
                 break
 
-    model.load_state_dict(torch.load(best_path, map_location=device))
+    model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
     test_results = _evaluate(
-        model, test_loader, criterion, device, threshold=best_threshold
+        model, test_loader, criterion, device, threshold=best_threshold_value
     )
 
     y_true = test_results["y_true"]
@@ -453,6 +409,9 @@ def run_resnet(
         logits=test_results["logits"],
         ids=test_results["ids"],
         probs=test_results["probs"],
+        y_true=test_results["y_true"],
+        y_pred=test_results["y_pred"],
+        threshold=best_threshold_value,
     )
     torch.save(model.state_dict(), model_dir / "weights" / f"{model_name}.pth")
 
@@ -470,13 +429,17 @@ def run_resnet(
             "image_size": image_size,
             "epochs_requested": epochs,
             "best_val_auc": best_val_auc,
-            "threshold": best_threshold,
+            "threshold": best_threshold_value,
             "pretrained": pretrained,
             "train_backbone": train_backbone,
             "train_layer3": train_layer3,
             "use_weighted_sampler": use_weighted_sampler,
             "use_class_weights": use_class_weights,
-            "augment": augment,
+            "label_smoothing": label_smoothing,
+            "dropout": dropout,
+            "mixup_alpha": mixup_alpha,
+            "augment": effective_augment,
+            "augment_requested": augment,
             "threshold_strategy": threshold_strategy,
         },
     )

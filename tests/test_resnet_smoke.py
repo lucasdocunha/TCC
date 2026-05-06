@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import torch
 
 
@@ -27,7 +28,14 @@ def test_resnet_classifier_accepts_extra_input_channels():
     assert out.shape == (2, 2)
 
 
-def test_resnet_pipeline_tiny_run_writes_metrics(tmp_path):
+def test_resnet_rejects_external_pretrained_weights():
+    from src.models.resnet import resnet
+
+    with pytest.raises(ValueError, match="pretrained"):
+        resnet(num_classes=2, pretrained=True, architecture="resnet18")
+
+
+def test_resnet_pipeline_tiny_run_writes_metrics(tmp_path, tiny_phase1_dataset):
     from src.pipelines.resnet import run_resnet
 
     results = run_resnet(

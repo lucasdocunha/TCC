@@ -3,17 +3,17 @@ from torchvision import models
 
 
 _ARCHITECTURES = {
-    "resnet18": (models.resnet18, models.ResNet18_Weights.DEFAULT),
-    "resnet34": (models.resnet34, models.ResNet34_Weights.DEFAULT),
-    "resnet50": (models.resnet50, models.ResNet50_Weights.DEFAULT),
-    "resnet101": (models.resnet101, models.ResNet101_Weights.DEFAULT),
-    "resnet152": (models.resnet152, models.ResNet152_Weights.DEFAULT),
+    "resnet18": models.resnet18,
+    "resnet34": models.resnet34,
+    "resnet50": models.resnet50,
+    "resnet101": models.resnet101,
+    "resnet152": models.resnet152,
 }
 
 
 def resnet(
     num_classes: int = 2,
-    pretrained: bool = True,
+    pretrained: bool = False,
     architecture: str = "resnet18",
     dropout: float = 0.2,
     in_channels: int = 3,
@@ -22,9 +22,10 @@ def resnet(
         valid = ", ".join(sorted(_ARCHITECTURES))
         raise ValueError(f"architecture must be one of: {valid}")
 
-    builder, weights_enum = _ARCHITECTURES[architecture]
-    weights = weights_enum if pretrained else None
-    model = builder(weights=weights)
+    if pretrained:
+        raise ValueError("External pretrained ResNet weights are disabled for this project.")
+    builder = _ARCHITECTURES[architecture]
+    model = builder(weights=None)
 
     if in_channels != 3:
         old_conv = model.conv1
@@ -46,6 +47,7 @@ def resnet(
                 new_weight = new_weight * (3.0 / float(in_channels))
             else:
                 new_weight = old_weight[:, :in_channels, :, :]
+                new_weight = new_weight * (3.0 / float(in_channels))
             new_conv.weight.data.copy_(new_weight)
         model.conv1 = new_conv
 
