@@ -7,7 +7,11 @@ ViT: só RGB; roda uma vez ao final se RUN_VIT for True.
 """
 
 from __future__ import annotations
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv() -> bool:
+        return False
 
 import logging
 
@@ -93,6 +97,14 @@ def main() -> None:
             raw_min=RAW_MIN,
             batch_size=BATCH_SIZE,
             num_workers=NUM_WORKERS,
+            image_size=128,
+            patch_size=16,
+            hidden_size=128,
+            num_hidden_layers=3,
+            num_attention_heads=4,
+            dropout=0.25,
+            threshold_metric="f1",
+            mixup_alpha=0.2,
             multi_gpu=MULTI_GPU,
         )
 

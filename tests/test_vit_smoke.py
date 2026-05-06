@@ -32,6 +32,22 @@ def test_vit_collate_fn_stacks_tensor_batches():
     assert idxs.tolist() == [3, 4]
 
 
+def test_vit_model_accepts_frequency_channel_counts():
+    from src.models.vit import VisionTransformerClassifier
+
+    for channels in (1, 2, 4, 6):
+        model = VisionTransformerClassifier(
+            image_size=64,
+            patch_size=16,
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            in_channels=channels,
+        )
+        out = model(torch.zeros(2, channels, 64, 64))
+        assert out.shape == (2, 2)
+
+
 def test_vit_pipeline_tiny_run_writes_metrics(tmp_path, tiny_short_split_dataset):
     from src.pipelines.vit import run_vit
 

@@ -6,13 +6,19 @@ from torchvision import transforms
 
 
 class PatchEmbedding(nn.Module):
-    def __init__(self, image_size: int, patch_size: int, hidden_size: int):
+    def __init__(
+        self,
+        image_size: int,
+        patch_size: int,
+        hidden_size: int,
+        in_channels: int = 3,
+    ):
         super().__init__()
         if image_size % patch_size != 0:
             raise ValueError("image_size must be divisible by patch_size")
         self.num_patches = (image_size // patch_size) ** 2
         self.proj = nn.Conv2d(
-            in_channels=3,
+            in_channels=in_channels,
             out_channels=hidden_size,
             kernel_size=patch_size,
             stride=patch_size,

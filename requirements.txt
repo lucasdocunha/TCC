@@ -106,7 +106,6 @@ filelock==3.25.2 \
     --hash=sha256:b64ece2b38f4ca29dd3e810287aa8c48182bbecd1ae6e9ae126c9b35f1382694 \
     --hash=sha256:ca8afb0da15f229774c9ad1b455ed96e85a81373065fb10446672f64444ddf70
     # via
-    #   huggingface-hub
     #   torch
     #   triton
 fonttools==4.62.1 \
@@ -157,39 +156,11 @@ fsspec==2026.3.0 \
     --hash=sha256:1ee6a0e28677557f8c2f994e3eea77db6392b4de9cd1f5d7a9e87a0ae9d01b41 \
     --hash=sha256:d2ceafaad1b3457968ed14efa28798162f1638dbb5d2a6868a2db002a5ee39a4
     # via
-    #   huggingface-hub
     #   torch
 h11==0.16.0 \
     --hash=sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1 \
     --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
     # via httpcore
-hf-xet==1.4.3 ; platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' \
-    --hash=sha256:0392c79b7cf48418cd61478c1a925246cf10639f4cd9d94368d8ca1e8df9ea07 \
-    --hash=sha256:1feb0f3abeacee143367c326a128a2e2b60868ec12a36c225afb1d6c5a05e6d2 \
-    --hash=sha256:21644b404bb0100fe3857892f752c4d09642586fd988e61501c95bbf44b393a3 \
-    --hash=sha256:22bdc1f5fb8b15bf2831440b91d1c9bbceeb7e10c81a12e8d75889996a5c9da8 \
-    --hash=sha256:27c976ba60079fb8217f485b9c5c7fcd21c90b0367753805f87cb9f3cdc4418a \
-    --hash=sha256:2815a49a7a59f3e2edf0cf113ae88e8cb2ca2a221bf353fb60c609584f4884d4 \
-    --hash=sha256:39f2d2e9654cd9b4319885733993807aab6de9dfbd34c42f0b78338d6617421f \
-    --hash=sha256:42ee323265f1e6a81b0e11094564fb7f7e0ec75b5105ffd91ae63f403a11931b \
-    --hash=sha256:49ad8a8cead2b56051aa84d7fce3e1335efe68df3cf6c058f22a65513885baac \
-    --hash=sha256:5251d5ece3a81815bae9abab41cf7ddb7bcb8f56411bce0827f4a3071c92fdc6 \
-    --hash=sha256:60cf7fc43a99da0a853345cf86d23738c03983ee5249613a6305d3e57a5dca74 \
-    --hash=sha256:681c92a07796325778a79d76c67011764ecc9042a8c3579332b61b63ae512075 \
-    --hash=sha256:6b591fcad34e272a5b02607485e4f2a1334aebf1bc6d16ce8eb1eb8978ac2021 \
-    --hash=sha256:7551659ba4f1e1074e9623996f28c3873682530aee0a846b7f2f066239228144 \
-    --hash=sha256:7716d62015477a70ea272d2d68cd7cad140f61c52ee452e133e139abfe2c17ba \
-    --hash=sha256:7c2c7e20bcfcc946dc67187c203463f5e932e395845d098cc2a93f5b67ca0b47 \
-    --hash=sha256:8b301fc150290ca90b4fccd079829b84bb4786747584ae08b94b4577d82fb791 \
-    --hash=sha256:8ddedb73c8c08928c793df2f3401ec26f95be7f7e516a7bee2fbb546f6676113 \
-    --hash=sha256:987f09cfe418237812896a6736b81b1af02a3a6dcb4b4944425c4c4fca7a7cf8 \
-    --hash=sha256:bee693ada985e7045997f05f081d0e12c4c08bd7626dc397f8a7c487e6c04f7f \
-    --hash=sha256:c5b48db1ee344a805a1b9bd2cda9b6b65fe77ed3787bd6e87ad5521141d317cd \
-    --hash=sha256:d0da85329eaf196e03e90b84c2d0aca53bd4573d097a75f99609e80775f98025 \
-    --hash=sha256:d972fbe95ddc0d3c0fc49b31a8a69f47db35c1e3699bf316421705741aab6653 \
-    --hash=sha256:e23717ce4186b265f69afa66e6f0069fe7efbf331546f5c313d00e123dc84583 \
-    --hash=sha256:fc360b70c815bf340ed56c7b8c63aacf11762a4b099b2fe2c9bd6d6068668c08
-    # via huggingface-hub
 httpcore==1.0.9 \
     --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55 \
     --hash=sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8
@@ -197,13 +168,6 @@ httpcore==1.0.9 \
 httpx==0.28.1 \
     --hash=sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc \
     --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
-    # via huggingface-hub
-huggingface-hub==1.9.2 \
-    --hash=sha256:8d09d080a186bd950a361bfc04b862dfb04d6a2b41d48e9ba1b37507cfd3f1e1 \
-    --hash=sha256:e1e62ce237d4fbeca9f970aeb15176fbd503e04c25577bfd22f44aa7aa2b5243
-    # via
-    #   tokenizers
-    #   transformers
 idna==3.11 \
     --hash=sha256:771a87f49d9defaf64091e6e6fe9c18d4833f140bd19464795bc32d966ca37ea \
     --hash=sha256:795dafcc9c04ed0c1fb032c2aa73654d8e8c5023a7df64a53f39190ada629902
@@ -541,7 +505,6 @@ numpy==2.4.4 \
     #   seaborn
     #   tcc
     #   torchvision
-    #   transformers
 nvidia-cublas-cu12==12.1.3.1 ; platform_machine == 'x86_64' and sys_platform == 'linux' \
     --hash=sha256:ee53ccca76a6fc08fb9701aa95b6ceb242cdaab118c3bb152af4e579af792728
     # via
@@ -599,10 +562,8 @@ packaging==26.0 \
     --hash=sha256:00243ae351a257117b6a241061796684b084ed1c516a08c48a3f7e147a9d80b4 \
     --hash=sha256:b36f1fef9334a5588b4166f8bcd26a14e521f2b55e6b9de3aaa80d3ff7a37529
     # via
-    #   huggingface-hub
     #   matplotlib
     #   plotly
-    #   transformers
 pandas==3.0.2 \
     --hash=sha256:01f31a546acd5574ef77fe199bc90b55527c225c20ccda6601cf6b0fd5ed597c \
     --hash=sha256:0555c5882688a39317179ab4a0ed41d3ebc8812ab14c69364bbee8fb7a3f6288 \
@@ -807,8 +768,6 @@ pyyaml==6.0.3 \
     --hash=sha256:f7057c9a337546edc7973c0d3ba84ddcdf0daa14533c2065749c9075001090e6 \
     --hash=sha256:fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0
     # via
-    #   huggingface-hub
-    #   transformers
 regex==2026.4.4 \
     --hash=sha256:04bb679bc0bde8a7bfb71e991493d47314e7b98380b083df2447cda4b6edb60f \
     --hash=sha256:05568c4fbf3cb4fa9e28e3af198c40d3237cf6041608a9022285fe567ec3ad62 \
@@ -907,28 +866,6 @@ regex==2026.4.4 \
     --hash=sha256:fa7922bbb2cc84fa062d37723f199d4c0cd200245ce269c05db82d904db66b83 \
     --hash=sha256:fe896e07a5a2462308297e515c0054e9ec2dd18dfdc9427b19900b37dfe6f40b \
     --hash=sha256:ffa81f81b80047ba89a3c69ae6a0f78d06f4a42ce5126b0eb2a0a10ad44e0b2e
-    # via transformers
-rich==14.3.3 \
-    --hash=sha256:793431c1f8619afa7d3b52b2cdec859562b950ea0d4b6b505397612db8d5362d \
-    --hash=sha256:b8daa0b9e4eef54dd8cf7c86c03713f53241884e814f4e2f5fb342fe520f639b
-    # via typer
-safetensors==0.7.0 \
-    --hash=sha256:07663963b67e8bd9f0b8ad15bb9163606cd27cc5a1b96235a50d8369803b96b0 \
-    --hash=sha256:1d060c70284127fa805085d8f10fbd0962792aed71879d00864acda69dbab981 \
-    --hash=sha256:42cb091236206bb2016d245c377ed383aa7f78691748f3bb6ee1bfa51ae2ce6a \
-    --hash=sha256:54bef08bf00a2bff599982f6b08e8770e09cc012d7bba00783fc7ea38f1fb37d \
-    --hash=sha256:5d72abdb8a4d56d4020713724ba81dac065fedb7f3667151c4a637f1d3fb26c0 \
-    --hash=sha256:672132907fcad9f2aedcb705b2d7b3b93354a2aec1b2f706c4db852abe338f85 \
-    --hash=sha256:8469155f4cb518bafb4acf4865e8bb9d6804110d2d9bdcaa78564b9fd841e104 \
-    --hash=sha256:94fd4858284736bb67a897a41608b5b0c2496c9bdb3bf2af1fa3409127f20d57 \
-    --hash=sha256:b0f6d66c1c538d5a94a73aa9ddca8ccc4227e6c9ff555322ea40bdd142391dd4 \
-    --hash=sha256:c74af94bf3ac15ac4d0f2a7c7b4663a15f8c2ab15ed0fc7531ca61d0835eccba \
-    --hash=sha256:c82f4d474cf725255d9e6acf17252991c3c8aac038d6ef363a4bf8be2f6db517 \
-    --hash=sha256:cdab83a366799fa730f90a4ebb563e494f28e9e92c4819e556152ad55e43591b \
-    --hash=sha256:d1239932053f56f3456f32eb9625590cc7582e905021f94636202a864d470755 \
-    --hash=sha256:dac7252938f0696ddea46f5e855dd3138444e82236e3be475f54929f0c510d48 \
-    --hash=sha256:e07d91d0c92a31200f25351f4acb2bc6aff7f48094e13ebb1d0fb995b54b6542
-    # via transformers
 scikit-learn==1.8.0 \
     --hash=sha256:00d6f1d66fbcf4eba6e356e1420d33cc06c70a45bb1363cd6f6a8e4ebbbdece2 \
     --hash=sha256:0d6ae97234d5d7079dc0040990a6f7aeb97cb7fa7e8945f1999a429b23569e0a \
@@ -1039,10 +976,6 @@ setuptools==81.0.0 ; python_full_version >= '3.12' \
     --hash=sha256:487b53915f52501f0a79ccfd0c02c165ffe06631443a886740b91af4b7a5845a \
     --hash=sha256:fdd925d5c5d9f62e4b74b30d6dd7828ce236fd6ed998a08d81de62ce5a6310d6
     # via torch
-shellingham==1.5.4 \
-    --hash=sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686 \
-    --hash=sha256:8dbca0739d487e5bd35ab3ca4b36e11c4078f3a234bfce294b0a0291363404de
-    # via typer
 six==1.17.0 \
     --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274 \
     --hash=sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81
@@ -1055,24 +988,6 @@ threadpoolctl==3.6.0 \
     --hash=sha256:43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb \
     --hash=sha256:8ab8b4aa3491d812b623328249fab5302a68d2d71745c8a4c719a2fcaba9f44e
     # via scikit-learn
-tokenizers==0.22.2 \
-    --hash=sha256:1c774b1276f71e1ef716e5486f21e76333464f47bece56bbd554485982a9e03e \
-    --hash=sha256:1e418a55456beedca4621dbab65a318981467a2b188e982a23e117f115ce5001 \
-    --hash=sha256:2249487018adec45d6e3554c71d46eb39fa8ea67156c640f7513eb26f318cec7 \
-    --hash=sha256:25b85325d0815e86e0bac263506dd114578953b7b53d7de09a6485e4a160a7dd \
-    --hash=sha256:29c30b83d8dcd061078b05ae0cb94d3c710555fbb44861139f9f83dcca3dc3e4 \
-    --hash=sha256:369cc9fc8cc10cb24143873a0d95438bb8ee257bb80c71989e3ee290e8d72c67 \
-    --hash=sha256:37ae80a28c1d3265bb1f22464c856bd23c02a05bb211e56d0c5301a435be6c1a \
-    --hash=sha256:38337540fbbddff8e999d59970f3c6f35a82de10053206a7562f1ea02d046fa5 \
-    --hash=sha256:473b83b915e547aa366d1eee11806deaf419e17be16310ac0a14077f1e28f917 \
-    --hash=sha256:544dd704ae7238755d790de45ba8da072e9af3eea688f698b137915ae959281c \
-    --hash=sha256:791135ee325f2336f498590eb2f11dc5c295232f288e75c99a36c5dbce63088a \
-    --hash=sha256:9ce725d22864a1e965217204946f830c37876eee3b2ba6fc6255e8e903d5fcbc \
-    --hash=sha256:a6bf3f88c554a2b653af81f3204491c818ae2ac6fbc09e76ef4773351292bc92 \
-    --hash=sha256:bfb88f22a209ff7b40a576d5324bf8286b519d7358663db21d6246fb17eea2d5 \
-    --hash=sha256:c9ea31edff2968b44a88f97d784c2f16dc0729b8b143ed004699ebca91f05c48 \
-    --hash=sha256:df6c4265b289083bf710dff49bc51ef252f9d5be33a45ee2bed151114a56207b
-    # via transformers
 torch==2.5.1+cu121 \
     --hash=sha256:1bfe18b79b0ff9be9383257a66c3f84621ce5f384f02c0a7c79503583d6ffd4b \
     --hash=sha256:222be02548c2e74a21a8fbc8e5b8d2eef9f9faee865d70385d2eb1b9aabcbc76 \
@@ -1092,29 +1007,16 @@ tqdm==4.67.3 \
     --hash=sha256:7d825f03f89244ef73f1d4ce193cb1774a8179fd96f31d7e1dcde62092b960bb \
     --hash=sha256:ee1e4c0e59148062281c49d80b25b67771a127c85fc9676d3be5f243206826bf
     # via
-    #   huggingface-hub
     #   tcc
-    #   transformers
-transformers==5.5.0 \
-    --hash=sha256:821a9ff0961abbb29eb1eb686d78df1c85929fdf213a3fe49dc6bd94f9efa944 \
-    --hash=sha256:c8db656cf51c600cd8c75f06b20ef85c72e8b8ff9abc880c5d3e8bc70e0ddcbd
-    # via tcc
 triton==3.1.0 ; python_full_version < '3.13' and platform_machine == 'x86_64' and sys_platform == 'linux' \
     --hash=sha256:0f34f6e7885d1bf0eaaf7ba875a5f0ce6f3c13ba98f9503651c1e6dc6757ed5c \
     --hash=sha256:c8182f42fd8080a7d39d666814fa36c5e30cc00ea7eeeb1a2983dbb4c99a0fdc
     # via torch
-typer==0.24.1 \
-    --hash=sha256:112c1f0ce578bfb4cab9ffdabc68f031416ebcc216536611ba21f04e9aa84c9e \
-    --hash=sha256:e39b4732d65fbdcde189ae76cf7cd48aeae72919dea1fdfc16593be016256b45
-    # via
-    #   huggingface-hub
-    #   transformers
 typing-extensions==4.15.0 \
     --hash=sha256:0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466 \
     --hash=sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548
     # via
     #   anyio
-    #   huggingface-hub
     #   torch
 tzdata==2026.1 ; sys_platform == 'emscripten' or sys_platform == 'win32' \
     --hash=sha256:4b1d2be7ac37ceafd7327b961aa3a54e467efbdb563a23655fbfe0d39cfc42a9 \

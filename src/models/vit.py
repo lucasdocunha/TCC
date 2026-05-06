@@ -16,12 +16,18 @@ class VisionTransformerClassifier(nn.Module):
         num_hidden_layers: int = 6,
         num_attention_heads: int = 8,
         dropout: float = 0.2,
+        in_channels: int = 3,
     ):
         super().__init__()
         if hidden_size % num_attention_heads != 0:
             raise ValueError("hidden_size must be divisible by num_attention_heads")
 
-        self.patch_embed = PatchEmbedding(image_size, patch_size, hidden_size)
+        self.patch_embed = PatchEmbedding(
+            image_size,
+            patch_size,
+            hidden_size,
+            in_channels=in_channels,
+        )
         num_tokens = self.patch_embed.num_patches + 1
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_tokens, hidden_size))
