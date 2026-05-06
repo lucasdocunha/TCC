@@ -1120,3 +1120,4 @@ tzdata==2026.1 ; sys_platform == 'emscripten' or sys_platform == 'win32' \
     --hash=sha256:4b1d2be7ac37ceafd7327b961aa3a54e467efbdb563a23655fbfe0d39cfc42a9 \
     --hash=sha256:67658a1903c75917309e753fdc349ac0efd8c27db7a0cb406a25be4840f87f98
     # via pandas
+python-dotenv
