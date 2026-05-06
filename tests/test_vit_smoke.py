@@ -79,3 +79,39 @@ def test_vit_pipeline_tiny_run_writes_metrics(tmp_path, tiny_short_split_dataset
     )
     assert 0.0 <= results["acc"] <= 1.0
     assert metrics_path.exists()
+
+
+def test_vit_pipeline_tiny_frequency_run_writes_metrics(
+    tmp_path, tiny_short_split_dataset
+):
+    from src.pipelines.vit import run_vit
+
+    results = run_vit(
+        fourier="frequency_3",
+        epochs=1,
+        raw_min=True,
+        data_limit=8,
+        output_root=tmp_path,
+        batch_size=4,
+        num_workers=0,
+        image_size=64,
+        patch_size=16,
+        hidden_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        train_backbone=True,
+        augment=False,
+        multi_gpu=False,
+    )
+
+    metrics_path = (
+        Path(tmp_path)
+        / "models"
+        / "vit"
+        / "vit_scratch"
+        / "frequency_3_limit8"
+        / "results"
+        / "metrics_summary.csv"
+    )
+    assert 0.0 <= results["f1"] <= 1.0
+    assert metrics_path.exists()

@@ -13,3 +13,7 @@ min_dataset
 *.npz
 *.npy
 .env
+
+/models/**
+!/models/
+!/models/.gitkeep

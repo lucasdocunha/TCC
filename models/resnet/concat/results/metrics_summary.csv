@@ -1,2 +1,0 @@
-acc,precision,f1,auc,recall,specificity,architecture,fourier,in_channels,image_size,epochs_requested,best_val_auc,threshold,pretrained,train_backbone,train_layer3,use_weighted_sampler,use_class_weights,augment,threshold_strategy
-0.7615349524861635,0.8722473954834691,0.7670092685074803,0.8636611868991922,0.6844314533518616,0.8652096595448571,resnet18,concat,4,224,50,0.9720663003404615,0.5774655938148499,True,True,True,True,False,True,accuracy

@@ -1,2 +1,0 @@
-acc,precision,f1,auc,recall,specificity,fourier,in_channels,image_size,epochs,best_val_auc,pretrained
-0.498,0.6651982378854625,0.3756218905472637,0.5622851547295664,0.2616984402079723,0.8203309692671394,magnitude,1,224,50,0.6370685943296237,google/vit-base-patch16-224

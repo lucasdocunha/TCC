@@ -1,9 +1,9 @@
 """
-Treina todos os pipelines × `ALL_FOURIER_MODES`.
+Treina os pipelines principais × `ALL_FOURIER_MODES`.
 
 Ajuste EPOCHS, RAW_MIN, RUN_VIT e BATCH_SIZE abaixo.
 
-ViT: só RGB; roda uma vez ao final se RUN_VIT for True.
+CLIP local: só RGB; roda uma vez ao final se RUN_VIT for True.
 """
 
 from __future__ import annotations
@@ -89,24 +89,24 @@ def main() -> None:
         )
 
     if RUN_VIT:
-        logger.info(
-            "======== ViT | somente RGB (pipeline sem modos Fourier) ========"
-        )
-        run_vit(
-            epochs=EPOCHS,
-            raw_min=RAW_MIN,
-            batch_size=BATCH_SIZE,
-            num_workers=NUM_WORKERS,
-            image_size=128,
-            patch_size=16,
-            hidden_size=128,
-            num_hidden_layers=3,
-            num_attention_heads=4,
-            dropout=0.25,
-            threshold_metric="f1",
-            mixup_alpha=0.2,
-            multi_gpu=MULTI_GPU,
-        )
+        for mode in ALL_FOURIER_MODES:
+            logger.info("======== ViT | input=%s ========", mode)
+            run_vit(
+                fourier=mode,
+                epochs=EPOCHS,
+                raw_min=RAW_MIN,
+                batch_size=BATCH_SIZE,
+                num_workers=NUM_WORKERS,
+                image_size=128,
+                patch_size=16,
+                hidden_size=128,
+                num_hidden_layers=3,
+                num_attention_heads=4,
+                dropout=0.25,
+                threshold_metric="f1",
+                mixup_alpha=0.2,
+                multi_gpu=MULTI_GPU,
+            )
 
         logger.info(
             "======== CLIP local | somente RGB (sem pesos externos) ========"
