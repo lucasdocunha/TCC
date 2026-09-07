@@ -320,14 +320,16 @@ uv run pytest -v
 If you use this codebase or benchmark in your research, please cite our paper:
 
 ```bibtex
-@misc{cunha2026benchmarkingspatialspectralselfsupervised,
-      title={Benchmarking Spatial, Spectral, and Self-Supervised Cues for Face Forgery Detection under Realistic Degradation}, 
-      author={Lucas Cunha and Lucas Sotomaior and Lucas Gasperin and Beatriz Caldas and Eduardo Pianovski and Rayson Laroca},
-      year={2026},
-      eprint={2609.01511},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2609.01511}, 
+@article{cunha2026benchmarking,
+  title = {Benchmarking Spatial, Spectral, and Self-Supervised Cues for Face Forgery Detection under Realistic Degradation},
+  author = {Lucas {Cunha} and Lucas {Sotomaior} and Lucas {Gasperin} and Beatriz {Caldas} and Eduardo {Pianovski} and Rayson {Laroca}},
+  year = {2026},
+  journal = {Conference on Graphics, Patterns and Images (SIBGRAPI)},
+  volume = {},
+  number = {},
+  pages = {1-6},
+  doi = {},
+  issn = {},
 }
 ```
 
